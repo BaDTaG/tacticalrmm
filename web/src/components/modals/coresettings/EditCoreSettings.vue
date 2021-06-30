@@ -1,5 +1,5 @@
 <template>
-  <q-card style="min-width: 85vh">
+  <q-card style="min-width: 60vw">
     <q-splitter v-model="splitterModel">
       <template v-slot:before>
         <q-tabs dense v-model="tab" vertical class="text-primary">
@@ -7,6 +7,9 @@
           <q-tab name="emailalerts" label="Email Alerts" />
           <q-tab name="smsalerts" label="SMS Alerts" />
           <q-tab name="meshcentral" label="MeshCentral" />
+          <q-tab name="customfields" label="Custom Fields" />
+          <q-tab name="keystore" label="Key Store" />
+          <q-tab name="urlactions" label="URL Actions" />
         </q-tabs>
       </template>
       <template v-slot:after>
@@ -23,7 +26,9 @@
                 <div class="text-subtitle2">General</div>
                 <hr />
                 <q-card-section class="row">
-                  <q-checkbox v-model="settings.agent_auto_update" label="Enable agent automatic self update" />
+                  <q-checkbox v-model="settings.agent_auto_update" label="Enable agent automatic self update">
+                    <q-tooltip> Runs at 35mins past every hour </q-tooltip>
+                  </q-checkbox>
                 </q-card-section>
                 <q-card-section class="row">
                   <div class="col-4">Default agent timezone:</div>
@@ -68,9 +73,48 @@
                   />
                 </q-card-section>
                 <q-card-section class="row">
+                  <div class="col-4">Default alert template:</div>
+                  <div class="col-2"></div>
+                  <q-select
+                    clearable
+                    map-options
+                    emit-value
+                    outlined
+                    dense
+                    options-dense
+                    v-model="settings.alert_template"
+                    :options="alertTemplateOptions"
+                    class="col-6"
+                  />
+                </q-card-section>
+                <q-card-section class="row">
+                  <div class="col-4">Remove Check Graph History older than (days):</div>
+                  <div class="col-2"></div>
+                  <q-input
+                    hint="Setting this value to 0 disables this feature"
+                    outlined
+                    dense
+                    v-model.number="settings.check_history_prune_days"
+                    class="col-6"
+                    :rules="[val => val >= 0 || 'Minimum is 0']"
+                  />
+                </q-card-section>
+                <q-card-section class="row">
+                  <div class="col-4">Clear faults on agents that haven't checked in after (days):</div>
+                  <div class="col-2"></div>
+                  <q-input
+                    hint="Setting this value to 0 disables this feature"
+                    outlined
+                    dense
+                    v-model.number="settings.clear_faults_days"
+                    class="col-6"
+                    :rules="[val => val >= 0 || 'Minimum is 0']"
+                  />
+                </q-card-section>
+                <q-card-section class="row">
                   <div class="col-4">Reset Patch Policy on Agents:</div>
                   <div class="col-2"></div>
-                  <q-btn color="negative" label="Reset" @click="resetPatchPolicyModal" />
+                  <q-btn color="negative" label="Reset" @click="showResetPatchPolicy" />
                 </q-card-section>
               </q-tab-panel>
               <!-- email alerts -->
@@ -94,7 +138,7 @@
                   <div class="col-3">Recipients</div>
                   <div class="col-4"></div>
                   <div class="col-5">
-                    <q-list bordered dense v-if="ready && settings.email_alert_recipients.length !== 0">
+                    <q-list dense v-if="ready && settings.email_alert_recipients.length !== 0">
                       <q-item
                         v-for="email in settings.email_alert_recipients"
                         :key="email"
@@ -201,7 +245,7 @@
                   <div class="col-3">Recipients</div>
                   <div class="col-4"></div>
                   <div class="col-5">
-                    <q-list bordered dense v-if="ready && settings.sms_alert_recipients.length !== 0">
+                    <q-list dense v-if="ready && settings.sms_alert_recipients.length !== 0">
                       <q-item
                         v-for="num in settings.sms_alert_recipients"
                         :key="num"
@@ -269,50 +313,77 @@
                   <q-input dense filled v-model="settings.mesh_token" class="col-6" />
                 </q-card-section>
               </q-tab-panel>
+              <q-tab-panel name="customfields">
+                <CustomFields />
+              </q-tab-panel>
+
+              <q-tab-panel name="keystore">
+                <KeyStoreTable />
+              </q-tab-panel>
+
+              <q-tab-panel name="urlactions">
+                <URLActionsTable />
+              </q-tab-panel>
             </q-tab-panels>
           </q-scroll-area>
           <q-card-section class="row items-center">
-            <q-btn label="Save" color="primary" type="submit" />
+            <q-btn
+              v-show="tab !== 'customfields' && tab !== 'keystore' && tab !== 'urlactions'"
+              label="Save"
+              color="primary"
+              type="submit"
+            />
             <q-btn
               v-show="tab === 'emailalerts'"
-              label="Save and Test"
+              label="Save and Test Email"
               color="primary"
               type="submit"
               class="q-ml-md"
               @click="emailTest = true"
             />
+            <q-btn
+              v-show="tab === 'smsalerts'"
+              label="Save and Test SMS"
+              color="primary"
+              type="submit"
+              class="q-ml-md"
+              @click="smsTest = true"
+            />
           </q-card-section>
         </q-form>
       </template>
     </q-splitter>
-
-    <q-dialog v-model="showResetPatchPolicyModal">
-      <ResetPatchPolicy @close="showResetPatchPolicyModal = false" />
-    </q-dialog>
   </q-card>
 </template>
 
 <script>
-import axios from "axios";
 import mixins from "@/mixins/mixins";
-import { mapState } from "vuex";
 import ResetPatchPolicy from "@/components/modals/coresettings/ResetPatchPolicy";
+import CustomFields from "@/components/modals/coresettings/CustomFields";
+import KeyStoreTable from "@/components/modals/coresettings/KeyStoreTable";
+import URLActionsTable from "@/components/modals/coresettings/URLActionsTable";
 
 export default {
   name: "EditCoreSettings",
-  components: { ResetPatchPolicy },
+  emits: ["close"],
+  components: {
+    CustomFields,
+    KeyStoreTable,
+    URLActionsTable,
+  },
   mixins: [mixins],
   data() {
     return {
-      showResetPatchPolicyModal: false,
       ready: false,
+      policies: [],
       settings: {},
       email: null,
       tab: "general",
-      splitterModel: 15,
+      splitterModel: 20,
       isPwd: true,
       allTimezones: [],
       emailTest: false,
+      smsTest: false,
       thumbStyle: {
         right: "2px",
         borderRadius: "5px",
@@ -320,19 +391,43 @@ export default {
         width: "5px",
         opacity: 0.75,
       },
+      alertTemplateOptions: [],
     };
   },
   methods: {
     getCoreSettings() {
-      axios.get("/core/getcoresettings/").then(r => {
-        this.settings = r.data;
-        this.allTimezones = Object.freeze(r.data.all_timezones);
-        this.ready = true;
-      });
+      this.$axios
+        .get("/core/getcoresettings/")
+        .then(r => {
+          this.settings = r.data;
+          this.allTimezones = Object.freeze(r.data.all_timezones);
+          this.ready = true;
+        })
+        .catch(e => {});
     },
     getPolicies() {
-      this.$store.dispatch("automation/loadPolicies").catch(e => {
-        this.notifyError(e.response.data);
+      this.$q.loading.show();
+      this.$axios
+        .get("/automation/policies/")
+        .then(r => {
+          this.policies = r.data.map(policy => ({ label: policy.name, value: policy.id }));
+          this.$q.loading.hide();
+        })
+        .catch(e => {
+          this.$q.loading.hide();
+        });
+    },
+    getAlertTemplates() {
+      this.$axios
+        .get("alerts/alerttemplates")
+        .then(r => {
+          this.alertTemplateOptions = r.data.map(template => ({ label: template.name, value: template.id }));
+        })
+        .catch(e => {});
+    },
+    showResetPatchPolicy() {
+      this.$q.dialog({
+        component: ResetPatchPolicy,
       });
     },
     toggleAddEmail() {
@@ -378,12 +473,10 @@ export default {
       const removed = this.settings.sms_alert_recipients.filter(k => k !== num);
       this.settings.sms_alert_recipients = removed;
     },
-    resetPatchPolicyModal() {
-      this.showResetPatchPolicyModal = true;
-    },
     editSettings() {
       this.$q.loading.show();
-      axios
+      delete this.settings.all_timezones;
+      this.$axios
         .patch("/core/editsettings/", this.settings)
         .then(r => {
           this.$q.loading.hide();
@@ -397,10 +490,23 @@ export default {
                 this.getCoreSettings();
                 this.notifySuccess(r.data, 3000);
               })
-              .catch(e => {
+              .catch(() => {
                 this.emailTest = false;
                 this.$q.loading.hide();
-                this.notifyError(e.response.data, 7000);
+              });
+          } else if (this.smsTest) {
+            this.$q.loading.show({ message: "Sending test SMS..." });
+            this.$axios
+              .get("/core/smstest/")
+              .then(r => {
+                this.smsTest = false;
+                this.$q.loading.hide();
+                this.getCoreSettings();
+                this.notifySuccess(r.data, 3000);
+              })
+              .catch(() => {
+                this.smsTest = false;
+                this.$q.loading.hide();
               });
           } else {
             this.$emit("close");
@@ -409,18 +515,13 @@ export default {
         })
         .catch(() => {
           this.$q.loading.hide();
-          this.notifyError("You have some invalid input. Please check all fields");
         });
     },
   },
-  computed: {
-    ...mapState({
-      policies: state => state.automation.policies.map(policy => ({ label: policy.name, value: policy.id })),
-    }),
-  },
-  created() {
+  mounted() {
     this.getCoreSettings();
     this.getPolicies();
+    this.getAlertTemplates();
   },
 };
 </script>

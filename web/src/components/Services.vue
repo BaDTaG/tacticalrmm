@@ -4,16 +4,16 @@
       dense
       :table-class="{ 'table-bgcolor': !$q.dark.isActive, 'table-bgcolor-dark': $q.dark.isActive }"
       class="remote-bg-tbl-sticky"
-      :data="servicesData"
+      :rows="servicesData"
       :columns="columns"
-      :pagination.sync="pagination"
+      v-model:pagination="pagination"
       :filter="filter"
       row-key="display_name"
       binary-state-sort
       hide-bottom
     >
       <template v-slot:top>
-        <q-btn dense flat push @click="refreshServices" icon="refresh" />
+        <q-btn dense flat push @click="getServices" icon="refresh" />
         <q-space />
         <q-input v-model="filter" outlined label="Search" dense clearable>
           <template v-slot:prepend>
@@ -21,7 +21,7 @@
           </template>
         </q-input>
       </template>
-      <template slot="body" slot-scope="props" :props="props">
+      <template v-slot:body="props">
         <q-tr :props="props">
           <q-menu context-menu>
             <q-list dense style="min-width: 200px">
@@ -88,7 +88,7 @@
             <div class="col-3">Startup type:</div>
             <div class="col-5">
               <q-select
-                @input="startupTypeChanged"
+                @update:model-value="startupTypeChanged"
                 dense
                 options-dense
                 outlined
@@ -242,12 +242,11 @@ export default {
         .then(r => {
           this.serviceDetailVisible = false;
           this.serviceDetailsModal = false;
-          this.refreshServices();
+          this.getServices();
           this.notifySuccess(`Service ${name} was edited!`);
         })
         .catch(e => {
           this.serviceDetailVisible = false;
-          this.notifyError(e.response.data);
         });
     },
     startupTypeChanged() {
@@ -273,7 +272,6 @@ export default {
         .catch(e => {
           this.serviceDetailVisible = false;
           this.serviceDetailsModal = false;
-          this.notifyError(e.response.data, 3000);
         });
     },
     serviceAction(name, action, fullname) {
@@ -303,40 +301,28 @@ export default {
       this.$axios
         .post("/services/serviceaction/", data)
         .then(r => {
-          this.refreshServices();
+          this.getServices();
           this.serviceDetailsModal = false;
           this.notifySuccess(`Service ${fullname} was ${status}!`);
         })
         .catch(e => {
           this.$q.loading.hide();
-          this.notifyError(e.response.data, 3000);
         });
     },
     getServices() {
+      this.$q.loading.show({ message: "Loading services..." });
       this.$axios
         .get(`/services/${this.pk}/services/`)
         .then(r => {
           this.servicesData = [r.data][0].services;
-        })
-        .catch(e => {
-          this.notifyError(e.response.data);
-        });
-    },
-    refreshServices() {
-      this.$q.loading.show({ message: "Reloading services..." });
-      this.$axios
-        .get(`/services/${this.pk}/refreshedservices/`)
-        .then(r => {
-          this.servicesData = [r.data][0].services;
           this.$q.loading.hide();
         })
         .catch(e => {
           this.$q.loading.hide();
-          this.notifyError(e.response.data);
         });
     },
   },
-  created() {
+  mounted() {
     this.getServices();
   },
 };

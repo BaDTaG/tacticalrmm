@@ -15,14 +15,15 @@ networks:
 # docker managed persistent volumes
 volumes:
   tactical_data:
-  salt_data:
   postgres_data:
   mongo_data:
   mesh_data:
+  redis_data:
 
 services:
   # postgres database for api service
   tactical-postgres:
+    container_name: trmm-postgres
     image: postgres:13-alpine
     restart: always
     environment:
@@ -36,13 +37,18 @@ services:
 
   # redis container for celery tasks
   tactical-redis:
+    container_name: trmm-redis
     image: redis:6.0-alpine
+    command: redis-server --appendonly yes
     restart: always
+    volumes: 
+      - redis_data:/data
     networks:
       - redis
 
   # used to initialize the docker environment
   tactical-init:
+    container_name: trmm-init
     image: ${IMAGE_REPO}tactical:${VERSION}
     restart: on-failure
     command: ["tactical-init"]
@@ -63,24 +69,14 @@ services:
       - proxy
     volumes:
       - tactical_data:/opt/tactical
-
-  # salt master and api
-  tactical-salt:
-    image: ${IMAGE_REPO}tactical-salt:${VERSION}
-    restart: always
-    ports:
-      - "4505:4505"
-      - "4506:4506"
-    volumes:
-      - tactical_data:/opt/tactical
-      - salt_data:/etc/salt
-    networks:
-      - proxy
   
   # nats
   tactical-nats:
+    container_name: trmm-nats
     image: ${IMAGE_REPO}tactical-nats:${VERSION}
     restart: always
+    environment:
+      API_HOST: ${API_HOST}
     ports:
       - "4222:4222"
     volumes:
@@ -92,6 +88,7 @@ services:
 
   # meshcentral container
   tactical-meshcentral:
+    container_name: trmm-meshcentral
     image: ${IMAGE_REPO}tactical-meshcentral:${VERSION}
     restart: always
     environment: 
@@ -101,8 +98,10 @@ services:
       MONGODB_USER: ${MONGODB_USER}
       MONGODB_PASSWORD: ${MONGODB_PASSWORD}
     networks:
-      - proxy
-      - mesh-db
+      proxy:
+        aliases:
+          - ${MESH_HOST}
+      mesh-db:
     volumes:
       - tactical_data:/opt/tactical
       - mesh_data:/home/node/app/meshcentral-data
@@ -111,6 +110,7 @@ services:
 
   # mongodb container for meshcentral
   tactical-mongodb:
+    container_name: trmm-mongodb
     image: mongo:4.4
     restart: always
     environment:
@@ -124,6 +124,7 @@ services:
 
   # container that hosts vue frontend
   tactical-frontend:
+    container_name: trmm-frontend
     image: ${IMAGE_REPO}tactical-frontend:${VERSION}
     restart: always
     networks:
@@ -133,6 +134,7 @@ services:
 
   # container for django backend
   tactical-backend:
+    container_name: trmm-backend
     image: ${IMAGE_REPO}tactical:${VERSION}
     command: ["tactical-backend"]
     restart: always
@@ -145,8 +147,25 @@ services:
     depends_on:
       - tactical-postgres
 
-  tactical-nginx:
+  # container for django websockets connections
+  tactical-websockets:
+    container_name: trmm-websockets
+    image: ${IMAGE_REPO}tactical:${VERSION}
+    command: ["tactical-websockets"]
+    restart: always
+    networks:
+      - proxy
+      - api-db
+      - redis
+    volumes:
+      - tactical_data:/opt/tactical
+    depends_on:
+      - tactical-postgres
+      - tactical-backend
+
   # container for tactical reverse proxy
+  tactical-nginx:
+    container_name: trmm-nginx
     image: ${IMAGE_REPO}tactical-nginx:${VERSION}
     restart: always
     environment:
@@ -166,6 +185,7 @@ services:
 
   # container for celery worker service
   tactical-celery:
+    container_name: trmm-celery
     image: ${IMAGE_REPO}tactical:${VERSION}
     command: ["tactical-celery"]
     restart: always
@@ -181,27 +201,13 @@ services:
 
   # container for celery beat service
   tactical-celerybeat:
+    container_name: trmm-celerybeat
     image: ${IMAGE_REPO}tactical:${VERSION}
     command: ["tactical-celerybeat"]
     restart: always
     networks:
       - proxy
       - redis
-      - api-db
-    volumes:
-      - tactical_data:/opt/tactical
-    depends_on:
-      - tactical-postgres
-      - tactical-redis
-
-  # container for celery winupdate tasks
-  tactical-celerywinupdate:
-    image: ${IMAGE_REPO}tactical:${VERSION}
-    command: ["tactical-celerywinupdate"]
-    restart: always
-    networks:
-      - redis
-      - proxy
       - api-db
     volumes:
       - tactical_data:/opt/tactical

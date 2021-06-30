@@ -6,14 +6,14 @@
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/python/black)
 
 Tactical RMM is a remote monitoring & management tool for Windows computers, built with Django and Vue.\
-It uses an [agent](https://github.com/wh1te909/rmmagent) written in golang, as well as the [SaltStack](https://github.com/saltstack/salt) api and [MeshCentral](https://github.com/Ylianst/MeshCentral)
+It uses an [agent](https://github.com/wh1te909/rmmagent) written in golang and integrates with [MeshCentral](https://github.com/Ylianst/MeshCentral)
 
-# [LIVE DEMO](https://rmm.xlawgaming.com/)
+# [LIVE DEMO](https://rmm.tacticalrmm.io/)
 Demo database resets every hour. Alot of features are disabled for obvious reasons due to the nature of this app.
 
-*Tactical RMM is currently in alpha and subject to breaking changes. Use in production at your own risk.*
-
 ### [Discord Chat](https://discord.gg/upGTkWp)
+
+### [Documentation](https://wh1te909.github.io/tacticalrmm/)
 
 ## Features
 
@@ -33,99 +33,6 @@ Demo database resets every hour. Alot of features are disabled for obvious reaso
 
 - Windows 7, 8.1, 10, Server 2008R2, 2012R2, 2016, 2019
 
-## Installation
+## Installation / Backup / Restore / Usage
 
-### Requirements
-- VPS with 4GB ram (an install script is provided for Ubuntu Server 20.04)
-- A domain you own with at least 3 subdomains
-- Google Authenticator app (2 factor is NOT optional)
-
-### Docker
-Refer to the [docker setup](docker/readme.md)
-
-
-### Installation example (Ubuntu server 20.04 LTS)
-
-Fresh VPS with latest updates\
-login as root and create a user and add to sudoers group (we will be creating a user called tactical)
-```
-apt update && apt -y upgrade
-adduser tactical
-usermod -a -G sudo tactical
-```
-
-switch to the tactical user and setup the firewall
-```
-su - tactical
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw allow ssh
-sudo ufw allow http
-sudo ufw allow https
-sudo ufw allow proto tcp from any to any port 4505,4506
-sudo ufw allow proto tcp from any to any port 4222
-sudo ufw enable && sudo ufw reload
-```
-
-Our domain for this example is tacticalrmm.com
-
-In the DNS manager of wherever our domain is hosted, we will create three A records, all pointing to the public IP address of our VPS
-
-Create A record ```api.tacticalrmm.com``` for the django rest backend\
-Create A record ```rmm.tacticalrmm.com``` for the vue frontend\
-Create A record ```mesh.tacticalrmm.com``` for meshcentral
-
-Download the install script and run it
-
-```
-wget https://raw.githubusercontent.com/wh1te909/tacticalrmm/master/install.sh
-chmod +x install.sh
-./install.sh
-```
-
- Links will be provided at the end of the install script.\
- Download the executable from the first link, then open ```rmm.tacticalrmm.com``` and login.\
- Upload the executable when prompted during the initial setup page.
-
-
-### Install an agent
-From the app's dashboard, choose Agents > Install Agent to generate an installer.
-
-## Updating
-Download and run [update.sh](https://raw.githubusercontent.com/wh1te909/tacticalrmm/master/update.sh)
-```
-wget https://raw.githubusercontent.com/wh1te909/tacticalrmm/master/update.sh
-chmod +x update.sh
-./update.sh
-```
-
-## Backup
-Download [backup.sh](https://raw.githubusercontent.com/wh1te909/tacticalrmm/master/backup.sh)
-```
-wget https://raw.githubusercontent.com/wh1te909/tacticalrmm/master/backup.sh
-```
-Change the postgres username and password at the top of the file (you can find them in `/rmm/api/tacticalrmm/tacticalrmm/local_settings.py` under the DATABASES section)
-
-Run it
-```
-chmod +x backup.sh
-./backup.sh
-```
-
-## Restore
-Change your 3 A records to point to new server's public IP
-
-Create same linux user account as old server and add to sudoers group and setup firewall (see install instructions above)
-
-Copy backup file to new server
-
-Download the restore script, and edit the postgres username/password at the top of the file. Same instructions as above in the backup steps.
-```
-wget https://raw.githubusercontent.com/wh1te909/tacticalrmm/master/restore.sh
-```
-
-Run the restore script, passing it the backup tar file as the first argument
-```
-chmod +x restore.sh
-./restore.sh rmm-backup-xxxxxxx.tar
-```
+### Refer to the [documentation](https://wh1te909.github.io/tacticalrmm/)

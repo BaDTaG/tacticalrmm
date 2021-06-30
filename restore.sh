@@ -1,14 +1,10 @@
 #!/bin/bash
 
-#####################################################
-
-pgusername="changeme"
-pgpw="hunter2"
-
-#####################################################
-
-SCRIPT_VERSION="7"
+SCRIPT_VERSION="29"
 SCRIPT_URL='https://raw.githubusercontent.com/wh1te909/tacticalrmm/master/restore.sh'
+
+sudo apt update
+sudo apt install -y curl wget dirmngr gnupg lsb-release
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -29,17 +25,37 @@ fi
 
 rm -f $TMP_FILE
 
-if [[ "$pgusername" == "changeme" || "$pgpw" == "hunter2" ]]; then
-  printf >&2 "${RED}You must change the postgres username/password at the top of this file.${NC}\n"
-  printf >&2 "${RED}Check the github readme for where to find them.${NC}\n"
-  exit 1
+osname=$(lsb_release -si); osname=${osname^}
+osname=$(echo "$osname" | tr  '[A-Z]' '[a-z]')
+fullrel=$(lsb_release -sd)
+codename=$(lsb_release -sc)
+relno=$(lsb_release -sr | cut -d. -f1)
+fullrelno=$(lsb_release -sr)
+
+# Fallback if lsb_release -si returns anything else than Ubuntu, Debian or Raspbian
+if [ ! "$osname" = "ubuntu" ] && [ ! "$osname" = "debian" ]; then
+  osname=$(grep -oP '(?<=^ID=).+' /etc/os-release | tr -d '"')
+  osname=${osname^}
 fi
 
-UBU20=$(grep 20.04 "/etc/"*"release")
-if ! [[ $UBU20 ]]; then
-  echo -ne "\033[0;31mThis restore script will only work on Ubuntu 20.04\e[0m\n"
-  exit 1
+# determine system
+if ([ "$osname" = "ubuntu" ] && [ "$fullrelno" = "20.04" ]) || ([ "$osname" = "debian" ] && [ $relno -ge 10 ]); then
+  echo $fullrel
+else
+ echo $fullrel
+ echo -ne "${RED}Only Ubuntu release 20.04 and Debian 10 and later, are supported\n"
+ echo -ne "Your system does not appear to be supported${NC}\n"
+ exit 1
 fi
+
+if ([ "$osname" = "ubuntu" ]); then
+  mongodb_repo="deb [arch=amd64] https://repo.mongodb.org/apt/$osname $codename/mongodb-org/4.4 multiverse"
+else
+  mongodb_repo="deb [arch=amd64] https://repo.mongodb.org/apt/$osname $codename/mongodb-org/4.4 main"
+
+fi
+
+postgresql_repo="deb [arch=amd64] https://apt.postgresql.org/pub/repos/apt/ $codename-pgdg main"
 
 if [ $EUID -eq 0 ]; then
   echo -ne "\033[0;31mDo NOT run this script as root. Exiting.\e[0m\n"
@@ -87,37 +103,27 @@ fi
 # prevents logging issues with some VPS providers like Vultr if this is a freshly provisioned instance that hasn't been rebooted yet
 sudo systemctl restart systemd-journald.service
 
-print_green 'Installing golang'
-
 sudo apt update
-sudo apt install -y curl wget
-sudo mkdir -p /usr/local/rmmgo
-go_tmp=$(mktemp -d -t rmmgo-XXXXXXXXXX)
-wget https://golang.org/dl/go1.15.5.linux-amd64.tar.gz -P ${go_tmp}
-
-tar -xzf ${go_tmp}/go1.15.5.linux-amd64.tar.gz -C ${go_tmp}
-
-sudo mv ${go_tmp}/go /usr/local/rmmgo/
-rm -rf ${go_tmp}
 
 print_green 'Downloading NATS'
 
 nats_tmp=$(mktemp -d -t nats-XXXXXXXXXX)
-wget https://github.com/nats-io/nats-server/releases/download/v2.1.9/nats-server-v2.1.9-linux-amd64.tar.gz -P ${nats_tmp}
+wget https://github.com/nats-io/nats-server/releases/download/v2.2.6/nats-server-v2.2.6-linux-amd64.tar.gz -P ${nats_tmp}
 
-tar -xzf ${nats_tmp}/nats-server-v2.1.9-linux-amd64.tar.gz -C ${nats_tmp}
+tar -xzf ${nats_tmp}/nats-server-v2.2.6-linux-amd64.tar.gz -C ${nats_tmp}
 
-sudo mv ${nats_tmp}/nats-server-v2.1.9-linux-amd64/nats-server /usr/local/bin/
+sudo mv ${nats_tmp}/nats-server-v2.2.6-linux-amd64/nats-server /usr/local/bin/
 sudo chmod +x /usr/local/bin/nats-server
 sudo chown ${USER}:${USER} /usr/local/bin/nats-server
 rm -rf ${nats_tmp}
 
 print_green 'Installing NodeJS'
 
-curl -sL https://deb.nodesource.com/setup_12.x | sudo -E bash -
+curl -sL https://deb.nodesource.com/setup_14.x | sudo -E bash -
 sudo apt update
 sudo apt install -y gcc g++ make
 sudo apt install -y nodejs
+sudo npm install -g npm
 
 print_green 'Restoring Nginx'
 
@@ -126,6 +132,7 @@ sudo systemctl stop nginx
 sudo rm -rf /etc/nginx
 sudo mkdir /etc/nginx
 sudo tar -xzf $tmp_dir/nginx/etc-nginx.tar.gz -C /etc/nginx
+sudo sed -i 's/worker_connections.*/worker_connections 2048;/g' /etc/nginx/nginx.conf
 rmmdomain=$(grep server_name /etc/nginx/sites-available/rmm.conf | grep -v 301 | head -1 | tr -d " \t" | sed 's/.*server_name//' | tr -d ';')
 frontenddomain=$(grep server_name /etc/nginx/sites-available/frontend.conf | grep -v 301 | head -1 | tr -d " \t" | sed 's/.*server_name//' | tr -d ';')
 meshdomain=$(grep server_name /etc/nginx/sites-available/meshcentral.conf | grep -v 301 | head -1 | tr -d " \t" | sed 's/.*server_name//' | tr -d ';')
@@ -164,25 +171,116 @@ print_green 'Restoring systemd services'
 sudo cp $tmp_dir/systemd/* /etc/systemd/system/
 sudo systemctl daemon-reload
 
-print_green 'Restoring saltapi user'
+print_green 'Installing Python 3.9'
 
-SALTPW=$(grep SALT_PASSWORD $tmp_dir/rmm/local_settings.py | tr -d " \t" | sed 's/.*=//' | tr -d '"')
-sudo adduser --no-create-home --disabled-password --gecos "" saltapi
-echo "saltapi:${SALTPW}" | sudo chpasswd
+sudo apt install -y build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev libsqlite3-dev libbz2-dev
+numprocs=$(nproc)
+cd ~
+wget https://www.python.org/ftp/python/3.9.2/Python-3.9.2.tgz
+tar -xf Python-3.9.2.tgz
+cd Python-3.9.2
+./configure --enable-optimizations
+make -j $numprocs
+sudo make altinstall
+cd ~
+sudo rm -rf Python-3.9.2 Python-3.9.2.tgz
 
-print_green 'Installing python, redis and git'
 
-sudo apt install -y python3.8-venv python3.8-dev python3-pip python3-cherrypy3 python3-setuptools python3-wheel ca-certificates redis git
+print_green 'Installing redis and git'
+sudo apt install -y ca-certificates redis git
+
+# redis configuration
+sudo gzip -dkc ${tmp_dir}/redis/appendonly.aof.gz | sudo tee /var/lib/redis/appendonly.aof > /dev/null
+sudo redis-check-aof --fix /var/lib/redis/appendonly.aof
+
+sudo redis-cli config set appendonly yes
+sudo redis-cli config rewrite
 
 print_green 'Installing postgresql'
 
-sudo sh -c 'echo "deb https://apt.postgresql.org/pub/repos/apt/ $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+echo "$postgresql_repo" | sudo tee /etc/apt/sources.list.d/pgdg.list
 wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
 sudo apt update
 sudo apt install -y postgresql-13
 sleep 2
+sudo systemctl enable postgresql
+sudo systemctl restart postgresql
+
+print_green 'Restoring MongoDB'
+
+wget -qO - https://www.mongodb.org/static/pgp/server-4.4.asc | sudo apt-key add -
+echo "$mongodb_repo" | sudo tee /etc/apt/sources.list.d/mongodb-org-4.4.list
+sudo apt update
+sudo apt install -y mongodb-org
+sudo systemctl enable mongod
+sudo systemctl restart mongod
+sleep 5
+mongorestore --gzip $tmp_dir/meshcentral/mongo
+
+
+sudo mkdir /rmm
+sudo chown ${USER}:${USER} /rmm
+sudo mkdir -p /var/log/celery
+sudo chown ${USER}:${USER} /var/log/celery
+git clone https://github.com/wh1te909/tacticalrmm.git /rmm/
+cd /rmm
+git config user.email "admin@example.com"
+git config user.name "Bob"
+git checkout master
+
+print_green 'Restoring MeshCentral'
+
+MESH_VER=$(grep "^MESH_VER" /rmm/api/tacticalrmm/tacticalrmm/settings.py | awk -F'[= "]' '{print $5}')
+sudo tar -xzf $tmp_dir/meshcentral/mesh.tar.gz -C /
+sudo chown ${USER}:${USER} -R /meshcentral
+cd /meshcentral
+npm install meshcentral@${MESH_VER}
+
+
+print_green 'Restoring the backend'
+
+numprocs=$(nproc)
+uwsgiprocs=4
+if [[ "$numprocs" == "1" ]]; then
+  uwsgiprocs=2
+else
+  uwsgiprocs=$numprocs
+fi
+
+uwsgini="$(cat << EOF
+[uwsgi]
+chdir = /rmm/api/tacticalrmm
+module = tacticalrmm.wsgi
+home = /rmm/api/env
+master = true
+processes = ${uwsgiprocs}
+threads = ${uwsgiprocs}
+enable-threads = true
+socket = /rmm/api/tacticalrmm/tacticalrmm.sock
+harakiri = 300
+chmod-socket = 660
+buffer-size = 65535
+vacuum = true
+die-on-term = true
+max-requests = 500
+EOF
+)"
+echo "${uwsgini}" > /rmm/api/tacticalrmm/app.ini
+
+cp $tmp_dir/rmm/local_settings.py /rmm/api/tacticalrmm/tacticalrmm/
+cp $tmp_dir/rmm/env /rmm/web/.env
+gzip -d $tmp_dir/rmm/debug.log.gz
+cp $tmp_dir/rmm/debug.log /rmm/api/tacticalrmm/tacticalrmm/private/log/
+cp $tmp_dir/rmm/mesh*.exe /rmm/api/tacticalrmm/tacticalrmm/private/exe/
+
+sudo cp /rmm/natsapi/bin/nats-api /usr/local/bin
+sudo chown ${USER}:${USER} /usr/local/bin/nats-api
+sudo chmod +x /usr/local/bin/nats-api
 
 print_green 'Restoring the database'
+
+pgusername=$(grep -w USER /rmm/api/tacticalrmm/tacticalrmm/local_settings.py | sed 's/^.*: //' | sed 's/.//' | sed -r 's/.{2}$//')
+pgpw=$(grep -w PASSWORD /rmm/api/tacticalrmm/tacticalrmm/local_settings.py | sed 's/^.*: //' | sed 's/.//' | sed -r 's/.{2}$//')
 
 sudo -u postgres psql -c "DROP DATABASE IF EXISTS tacticalrmm"
 sudo -u postgres psql -c "CREATE DATABASE tacticalrmm"
@@ -195,98 +293,23 @@ sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE tacticalrmm TO ${pgus
 gzip -d $tmp_dir/postgres/*.psql.gz
 PGPASSWORD=${pgpw} psql -h localhost -U ${pgusername} -d tacticalrmm -f $tmp_dir/postgres/db*.psql
 
-
-print_green 'Restoring MongoDB'
-
-wget -qO - https://www.mongodb.org/static/pgp/server-4.2.asc | sudo apt-key add -
-echo "deb [ arch=amd64 ] https://repo.mongodb.org/apt/ubuntu bionic/mongodb-org/4.2 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-4.2.list
-sudo apt update
-sudo apt install -y mongodb-org
-sudo systemctl enable mongod
-sudo systemctl restart mongod
-sleep 5
-mongorestore --gzip $tmp_dir/meshcentral/mongo
-
-print_green 'Restoring MeshCentral'
-
-sudo tar -xzf $tmp_dir/meshcentral/mesh.tar.gz -C /
-sudo chown ${USER}:${USER} -R /meshcentral
-cd /meshcentral
-npm install meshcentral@0.6.84
-
-
-print_green 'Restoring the backend'
-
-sudo mkdir /rmm
-sudo chown ${USER}:${USER} /rmm
-sudo mkdir -p /var/log/celery
-sudo chown ${USER}:${USER} /var/log/celery
-git clone https://github.com/wh1te909/tacticalrmm.git /rmm/
-cd /rmm
-git config user.email "admin@example.com"
-git config user.name "Bob"
-git checkout master
-
-cp $tmp_dir/rmm/local_settings.py /rmm/api/tacticalrmm/tacticalrmm/
-cp $tmp_dir/rmm/env /rmm/web/.env
-cp $tmp_dir/rmm/app.ini /rmm/api/tacticalrmm/
-gzip -d $tmp_dir/rmm/debug.log.gz
-cp $tmp_dir/rmm/debug.log /rmm/api/tacticalrmm/tacticalrmm/private/log/
-cp $tmp_dir/rmm/mesh*.exe /rmm/api/tacticalrmm/tacticalrmm/private/exe/
-
-/usr/local/rmmgo/go/bin/go get github.com/josephspurrier/goversioninfo/cmd/goversioninfo
-sudo cp /rmm/api/tacticalrmm/core/goinstaller/bin/goversioninfo /usr/local/bin/
-sudo chown ${USER}:${USER} /usr/local/bin/goversioninfo
-sudo chmod +x /usr/local/bin/goversioninfo
+SETUPTOOLS_VER=$(grep "^SETUPTOOLS_VER" /rmm/api/tacticalrmm/tacticalrmm/settings.py | awk -F'[= "]' '{print $5}')
+WHEEL_VER=$(grep "^WHEEL_VER" /rmm/api/tacticalrmm/tacticalrmm/settings.py | awk -F'[= "]' '{print $5}')
 
 cd /rmm/api
-python3 -m venv env
+python3.9 -m venv env
 source /rmm/api/env/bin/activate
 cd /rmm/api/tacticalrmm
 pip install --no-cache-dir --upgrade pip
-pip install --no-cache-dir setuptools==49.6.0 wheel==0.35.1
+pip install --no-cache-dir setuptools==${SETUPTOOLS_VER} wheel==${WHEEL_VER}
 pip install --no-cache-dir -r /rmm/api/tacticalrmm/requirements.txt
+python manage.py migrate
 python manage.py collectstatic --no-input
 python manage.py reload_nats
 deactivate
 
 sudo systemctl enable nats.service
 sudo systemctl start nats.service
-
-
-print_green 'Installing Salt Master'
-
-wget -O - https://repo.saltstack.com/py3/ubuntu/20.04/amd64/latest/SALTSTACK-GPG-KEY.pub | sudo apt-key add -
-echo 'deb http://repo.saltstack.com/py3/ubuntu/20.04/amd64/latest focal main' | sudo tee /etc/apt/sources.list.d/saltstack.list
-
-sudo apt update
-sudo apt install -y salt-master
-
-print_green 'Waiting 30 seconds for salt to start'
-sleep 30
-
-print_green 'Installing Salt API'
-sudo apt install -y salt-api
-
-sudo sed -i 's/msgpack_kwargs = {"raw": six.PY2}/msgpack_kwargs = {"raw": six.PY2, "max_buffer_size": 2147483647}/g' /usr/lib/python3/dist-packages/salt/transport/ipc.py
-
-sudo systemctl enable salt-master
-sudo systemctl enable salt-api
-sudo systemctl restart salt-api
-sleep 3
-
-print_green 'Restoring salt keys'
-
-sudo systemctl stop salt-master
-sudo systemctl stop salt-api
-sudo rm -rf /etc/salt
-sudo mkdir /etc/salt
-sudo tar -xzf $tmp_dir/salt/etc-salt.tar.gz -C /etc/salt
-sudo mkdir -p /srv/salt
-sudo tar -xzf $tmp_dir/salt/srv-salt.tar.gz -C /srv/salt
-sudo chown ${USER}:${USER} -R /srv/salt/
-sudo chown ${USER}:www-data /srv/salt/scripts/userdefined
-sudo chmod 750 /srv/salt/scripts/userdefined
 
 print_green 'Restoring the frontend'
 
@@ -303,32 +326,25 @@ sudo chown www-data:www-data -R /var/www/rmm/dist
 # reset perms
 sudo chown ${USER}:${USER} -R /rmm
 sudo chown ${USER}:${USER} /var/log/celery
-sudo chown ${USER}:${USER} -R /srv/salt/
 sudo chown ${USER}:${USER} -R /etc/conf.d/
-sudo chown ${USER}:www-data /srv/salt/scripts/userdefined
 sudo chown -R $USER:$GROUP /home/${USER}/.npm
 sudo chown -R $USER:$GROUP /home/${USER}/.config
 sudo chown -R $USER:$GROUP /home/${USER}/.cache
-sudo chmod 750 /srv/salt/scripts/userdefined
 
 print_green 'Enabling Services'
 sudo systemctl daemon-reload
 
-for i in celery.service celerybeat.service celery-winupdate.service rmm.service nginx
+for i in celery.service celerybeat.service rmm.service daphne.service nginx
 do
   sudo systemctl enable ${i}
-  sudo systemctl restart ${i}
+  sudo systemctl stop ${i}
+  sudo systemctl start ${i}
 done
 sleep 5
 
 print_green 'Starting meshcentral'
 sudo systemctl enable meshcentral
 sudo systemctl start meshcentral
-
-print_green 'Restarting salt and waiting 30 seconds'
-sudo systemctl restart salt-master
-sleep 30
-sudo systemctl restart salt-api
 
 printf >&2 "${YELLOW}%0.s*${NC}" {1..80}
 printf >&2 "\n\n"

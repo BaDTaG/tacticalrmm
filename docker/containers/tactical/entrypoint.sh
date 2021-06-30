@@ -9,8 +9,6 @@ set -e
 : "${POSTGRES_USER:=tactical}"
 : "${POSTGRES_PASS:=tactical}"
 : "${POSTGRES_DB:=tacticalrmm}"
-: "${SALT_HOST:=tactical-salt}"
-: "${SALT_USER:=saltapi}"
 : "${MESH_CONTAINER:=tactical-meshcentral}"
 : "${MESH_USER:=meshcentral}"
 : "${MESH_PASS:=meshcentralpass}"
@@ -31,14 +29,15 @@ function check_tactical_ready {
 # tactical-init
 if [ "$1" = 'tactical-init' ]; then
 
-  mkdir -p ${TACTICAL_DIR}/tmp
-  mkdir -p ${TACTICAL_DIR}/scripts/userdefined
-
   test -f "${TACTICAL_READY_FILE}" && rm "${TACTICAL_READY_FILE}"
 
   # copy container data to volume
-  cp -af ${TACTICAL_TMP_DIR}/. ${TACTICAL_DIR}/
+  rsync -a --no-perms --no-owner --delete --exclude "tmp/*" --exclude "certs/*" --exclude="api/tacticalrmm/private/*" "${TACTICAL_TMP_DIR}/" "${TACTICAL_DIR}/"
 
+  mkdir -p ${TACTICAL_DIR}/tmp
+  mkdir -p ${TACTICAL_DIR}/api/tacticalrmm/private/exe
+  mkdir -p ${TACTICAL_DIR}/api/tacticalrmm/logs
+  
   until (echo > /dev/tcp/"${POSTGRES_HOST}"/"${POSTGRES_PORT}") &> /dev/null; do
     echo "waiting for postgresql container to be ready..."
     sleep 5
@@ -53,14 +52,6 @@ if [ "$1" = 'tactical-init' ]; then
   MESH_TOKEN=$(cat ${TACTICAL_DIR}/tmp/mesh_token)
   ADMINURL=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 70 | head -n 1)
   DJANGO_SEKRET=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 80 | head -n 1)
-
-  # write salt pass to tmp dir
-  if [ ! -f "${TACTICAL__DIR}/tmp/salt_pass" ]; then
-    SALT_PASS=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 20 | head -n 1) 
-    echo "${SALT_PASS}" > ${TACTICAL_DIR}/tmp/salt_pass
-  else
-    SALT_PASS=$(cat ${TACTICAL_DIR}/tmp/salt_pass)
-  fi
   
   localvars="$(cat << EOF
 SECRET_KEY = '${DJANGO_SEKRET}'
@@ -69,9 +60,15 @@ DEBUG = False
 
 DOCKER_BUILD = True
 
+CERT_FILE = '/opt/tactical/certs/fullchain.pem'
+KEY_FILE = '/opt/tactical/certs/privkey.pem'
+
+EXE_DIR = '/opt/tactical/api/tacticalrmm/private/exe'
+LOG_DIR = '/opt/tactical/api/tacticalrmm/private/log'
+
 SCRIPTS_DIR = '/opt/tactical/scripts'
 
-ALLOWED_HOSTS = ['${API_HOST}']
+ALLOWED_HOSTS = ['${API_HOST}', 'tactical-backend']
 
 ADMIN_URL = '${ADMINURL}/'
 
@@ -108,14 +105,12 @@ if not DEBUG:
         )
     })
 
-SALT_USERNAME = '${SALT_USER}'
-SALT_PASSWORD = '${SALT_PASS}'
-SALT_HOST     = '${SALT_HOST}'
 MESH_USERNAME = '${MESH_USER}'
 MESH_SITE = 'https://${MESH_HOST}'
 MESH_TOKEN_KEY = '${MESH_TOKEN}'
 REDIS_HOST    = '${REDIS_HOST}'
 MESH_WS_URL = 'ws://${MESH_CONTAINER}:443'
+ADMIN_ENABLED = False
 EOF
 )"
 
@@ -129,6 +124,7 @@ EOF
   python manage.py load_chocos
   python manage.py load_community_scripts
   python manage.py reload_nats
+  python manage.py create_installer_user
 
   # create super user 
   echo "from accounts.models import User; User.objects.create_superuser('${TRMM_USER}', 'admin@example.com', '${TRMM_PASS}') if not User.objects.filter(username='${TRMM_USER}').exists() else 0;" | python manage.py shell
@@ -165,16 +161,20 @@ fi
 
 if [ "$1" = 'tactical-celery' ]; then
   check_tactical_ready
-  celery -A tacticalrmm worker
+  celery -A tacticalrmm worker -l info
 fi
 
 if [ "$1" = 'tactical-celerybeat' ]; then
   check_tactical_ready
   test -f "${TACTICAL_DIR}/api/celerybeat.pid" && rm "${TACTICAL_DIR}/api/celerybeat.pid"
-  celery -A tacticalrmm beat
+  celery -A tacticalrmm beat -l info
 fi
 
-if [ "$1" = 'tactical-celerywinupdate' ]; then
+# backend container
+if [ "$1" = 'tactical-websockets' ]; then
   check_tactical_ready
-  celery -A tacticalrmm worker -Q wupdate
+
+  export DJANGO_SETTINGS_MODULE=tacticalrmm.settings
+
+  daphne tacticalrmm.asgi:application --port 8383 -b 0.0.0.0
 fi

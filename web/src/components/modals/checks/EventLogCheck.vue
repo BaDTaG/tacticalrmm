@@ -14,7 +14,7 @@
           outlined
           v-model="eventlogcheck.name"
           label="Descriptive Name"
-          :rules="[ val => !!val || '*Required' ]"
+          :rules="[val => !!val || '*Required']"
         />
       </q-card-section>
       <q-card-section>
@@ -52,7 +52,7 @@
         <q-checkbox
           v-model="eventSource"
           label="Event source"
-          @input="eventlogcheck.event_source = null"
+          @update:model-value="eventlogcheck.event_source = null"
         />
         <q-input dense outlined v-model="eventlogcheck.event_source" :disable="!eventSource" />
       </q-card-section>
@@ -60,7 +60,7 @@
         <q-checkbox
           v-model="eventMessage"
           label="Message contains string"
-          @input="eventlogcheck.event_message = null"
+          @update:model-value="eventlogcheck.event_message = null"
         />
         <q-input dense outlined v-model="eventlogcheck.event_message" :disable="!eventMessage" />
       </q-card-section>
@@ -70,11 +70,11 @@
           outlined
           v-model.number="eventlogcheck.search_last_days"
           label="How many previous days to search (Enter 0 for the entire log)"
-          :rules="[ 
-                    val => !!val.toString() || '*Required',
-                    val => val >= 0 || 'Min 0',
-                    val => val <= 9999 || 'Max 9999'
-                ]"
+          :rules="[
+            val => !!val.toString() || '*Required',
+            val => val >= 0 || 'Min 0',
+            val => val <= 9999 || 'Max 9999',
+          ]"
         />
       </q-card-section>
       <q-card-section>
@@ -83,19 +83,30 @@
           <q-radio dense v-model="eventlogcheck.event_type" val="INFO" label="Information" />
           <q-radio dense v-model="eventlogcheck.event_type" val="WARNING" label="Warning" />
           <q-radio dense v-model="eventlogcheck.event_type" val="ERROR" label="Error" />
-          <q-radio
-            dense
-            v-model="eventlogcheck.event_type"
-            val="AUDIT_SUCCESS"
-            label="Success Audit"
-          />
-          <q-radio
-            dense
-            v-model="eventlogcheck.event_type"
-            val="AUDIT_FAILURE"
-            label="Failure Audit"
-          />
+          <q-radio dense v-model="eventlogcheck.event_type" val="AUDIT_SUCCESS" label="Success Audit" />
+          <q-radio dense v-model="eventlogcheck.event_type" val="AUDIT_FAILURE" label="Failure Audit" />
         </div>
+      </q-card-section>
+      <q-card-section>
+        <q-select
+          outlined
+          dense
+          options-dense
+          map-options
+          emit-value
+          v-model="eventlogcheck.alert_severity"
+          :options="severityOptions"
+          label="Alert Severity"
+        />
+      </q-card-section>
+      <q-card-section>
+        <q-input
+          label="Number of events found before alert"
+          dense
+          outlined
+          type="number"
+          v-model.number="eventlogcheck.number_of_events_b4_alert"
+        />
       </q-card-section>
       <q-card-section>
         <q-select
@@ -105,6 +116,16 @@
           v-model="eventlogcheck.fails_b4_alert"
           :options="failOptions"
           label="Number of consecutive failures before alert"
+        />
+      </q-card-section>
+      <q-card-section>
+        <q-input
+          outlined
+          dense
+          type="number"
+          v-model.number="eventlogcheck.run_interval"
+          label="Run this check every (seconds)"
+          hint="Setting this value to anything other than 0 will override the 'Run checks every' setting on the agent"
         />
       </q-card-section>
       <q-card-actions align="right">
@@ -120,6 +141,7 @@
 import mixins from "@/mixins/mixins";
 export default {
   name: "EventLogCheck",
+  emits: ["close"],
   props: {
     agentpk: Number,
     policypk: Number,
@@ -139,7 +161,10 @@ export default {
         fail_when: "contains",
         search_last_days: 1,
         fails_b4_alert: 1,
+        number_of_events_b4_alert: 1,
         event_id_is_wildcard: false,
+        alert_severity: "warning",
+        run_interval: 0,
       },
       eventMessage: false,
       eventSource: false,
@@ -147,6 +172,11 @@ export default {
       failWhenOptions: [
         { label: "Log contains", value: "contains" },
         { label: "Log does not contain", value: "not_contains" },
+      ],
+      severityOptions: [
+        { label: "Informational", value: "info" },
+        { label: "Warning", value: "warning" },
+        { label: "Error", value: "error" },
       ],
       failOptions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
     };
@@ -167,7 +197,7 @@ export default {
             this.eventMessage = true;
           }
         })
-        .catch(() => this.notifyError("Something went wrong"));
+        .catch(e => {});
     },
     addCheck() {
       const pk = this.policypk ? { policy: this.policypk } : { pk: this.agentpk };
@@ -192,7 +222,7 @@ export default {
           this.reloadChecks();
           this.notifySuccess(r.data);
         })
-        .catch(e => this.notifyError(e.response.data.non_field_errors));
+        .catch(e => {});
     },
     editCheck() {
       this.eventlogcheck.event_id_is_wildcard = this.eventlogcheck.event_id === "*" ? true : false;
@@ -212,12 +242,10 @@ export default {
           this.reloadChecks();
           this.notifySuccess(r.data);
         })
-        .catch(e => this.notifyError(e.response.data.non_field_errors));
+        .catch(e => {});
     },
     reloadChecks() {
-      if (this.policypk) {
-        this.$store.dispatch("automation/loadPolicyChecks", this.policypk);
-      } else {
+      if (this.agentpk) {
         this.$store.dispatch("loadChecks", this.agentpk);
       }
     },

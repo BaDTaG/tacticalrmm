@@ -23,6 +23,7 @@
           <q-tab name="base_board" label="Motherboard" />
           <q-tab name="comp_sys_prod" label="Computer System Product" />
           <q-tab name="network_config" label="Network Config" />
+          <q-tab name="graphics" label="Graphics" />
           <q-tab name="desktop_monitor" label="Monitors" />
           <q-tab name="network_adapter" label="Network Adapters" />
         </q-tabs>
@@ -63,6 +64,9 @@
           <q-tab-panel name="desktop_monitor">
             <WmiDetail :info="desktop_monitor" />
           </q-tab-panel>
+          <q-tab-panel name="graphics">
+            <WmiDetail :info="graphics" />
+          </q-tab-panel>
           <q-tab-panel name="network_adapter">
             <WmiDetail :info="network_adapter" />
           </q-tab-panel>
@@ -87,7 +91,7 @@ export default {
   computed: {
     ...mapGetters(["selectedAgentPk"]),
     assets() {
-      return Object.freeze(this.$store.state.agentSummary.wmi_detail);
+      return this.$store.state.agentSummary.wmi_detail;
     },
     os() {
       return this.assets.os;
@@ -124,6 +128,9 @@ export default {
     },
     network_adapter() {
       return this.assets.network_adapter;
+    },
+    graphics() {
+      return this.assets.graphics;
     },
   },
 };

@@ -1,5 +1,5 @@
 <template>
-  <q-card style="min-width: 800px" v-if="agentLoaded && clientsLoaded">
+  <q-card style="min-width: 800px">
     <q-splitter v-model="splitterModel">
       <template v-slot:before>
         <q-tabs dense v-model="tab" vertical class="text-primary">
@@ -19,31 +19,29 @@
               <!-- general -->
               <q-tab-panel name="general">
                 <q-card-section class="row">
-                  <div class="col-2">Client:</div>
-                  <div class="col-2"></div>
-                  <q-select
-                    @input="agent.site = site_options[0].value"
-                    dense
-                    options-dense
-                    outlined
-                    v-model="agent.client"
-                    :options="client_options"
-                    class="col-8"
-                  />
-                </q-card-section>
-                <q-card-section class="row">
                   <div class="col-2">Site:</div>
                   <div class="col-2"></div>
                   <q-select
-                    class="col-8"
                     dense
                     options-dense
-                    emit-value
-                    map-options
                     outlined
                     v-model="agent.site"
-                    :options="site_options"
-                  />
+                    :options="siteOptions"
+                    map-options
+                    emit-value
+                    class="col-8"
+                  >
+                    <template v-slot:option="scope">
+                      <q-item v-if="!scope.opt.category" v-bind="scope.itemProps" class="q-pl-lg">
+                        <q-item-section>
+                          <q-item-label v-html="scope.opt.label"></q-item-label>
+                        </q-item-section>
+                      </q-item>
+                      <q-item-label v-if="scope.opt.category" v-bind="scope.itemProps" header class="q-pa-sm">{{
+                        scope.opt.category
+                      }}</q-item-label>
+                    </template>
+                  </q-select>
                 </q-card-section>
                 <q-card-section class="row">
                   <div class="col-2">Type:</div>
@@ -60,13 +58,7 @@
                 <q-card-section class="row">
                   <div class="col-2">Description:</div>
                   <div class="col-2"></div>
-                  <q-input
-                    outlined
-                    dense
-                    v-model="agent.description"
-                    class="col-8"
-                    :rules="[val => !!val || '*Required']"
-                  />
+                  <q-input outlined dense v-model="agent.description" class="col-8" />
                 </q-card-section>
                 <q-card-section class="row">
                   <div class="col-2">Timezone:</div>
@@ -74,7 +66,7 @@
                   <q-select outlined dense options-dense v-model="timezone" :options="allTimezones" class="col-8" />
                 </q-card-section>
                 <q-card-section class="row">
-                  <div class="col-10">Check interval:</div>
+                  <div class="col-10">Run checks every:</div>
                   <q-input
                     dense
                     type="number"
@@ -84,13 +76,35 @@
                     class="col-2"
                     :rules="[
                       val => !!val || '*Required',
-                      val => val >= 60 || 'Minimum is 60 seconds',
-                      val => val <= 3600 || 'Maximum is 3600 seconds',
+                      val => val >= 15 || 'Minimum is 15 seconds',
+                      val => val <= 86400 || 'Maximum is 86400 seconds',
                     ]"
                   />
                 </q-card-section>
                 <q-card-section class="row">
-                  <div class="col-10">Send an overdue alert if the server has not reported in after:</div>
+                  <div class="col-10">
+                    <q-icon class="q-pr-sm" name="fas fa-signal" size="1.2em" color="warning" /> Mark an agent as
+                    <span class="text-weight-bold">offline</span> if it has not checked in after:
+                  </div>
+                  <q-input
+                    dense
+                    type="number"
+                    filled
+                    label="Minutes"
+                    v-model.number="agent.offline_time"
+                    class="col-2"
+                    :rules="[
+                      val => !!val || '*Required',
+                      val => val >= 2 || 'Minimum is 2 minutes',
+                      val => val < 9999999 || 'Maximum is 9999999 minutes',
+                    ]"
+                  />
+                </q-card-section>
+                <q-card-section class="row">
+                  <div class="col-10">
+                    <q-icon class="q-pr-sm" name="fas fa-signal" size="1.2em" color="negative" /> Mark an agent as
+                    <span class="text-weight-bold">overdue</span> if it has not checked in after:
+                  </div>
                   <q-input
                     dense
                     type="number"
@@ -100,7 +114,7 @@
                     class="col-2"
                     :rules="[
                       val => !!val || '*Required',
-                      val => val >= 5 || 'Minimum is 5 minutes',
+                      val => val >= 3 || 'Minimum is 3 minutes',
                       val => val < 9999999 || 'Maximum is 9999999 minutes',
                     ]"
                   />
@@ -108,6 +122,10 @@
                 <q-card-section class="row">
                   <q-checkbox v-model="agent.overdue_email_alert" label="Get overdue email alerts" />
                   <q-checkbox v-model="agent.overdue_text_alert" label="Get overdue sms alerts" />
+                </q-card-section>
+                <div class="text-h6">Custom Fields</div>
+                <q-card-section v-for="field in customFields" :key="field.id">
+                  <CustomField v-model="custom_fields[field.name]" :field="field" />
                 </q-card-section>
               </q-tab-panel>
               <!-- patch -->
@@ -129,15 +147,17 @@
 import { mapGetters } from "vuex";
 import mixins from "@/mixins/mixins";
 import PatchPolicyForm from "@/components/modals/agents/PatchPolicyForm";
+import CustomField from "@/components/CustomField";
 
 export default {
   name: "EditAgent",
-  components: { PatchPolicyForm },
+  emits: ["edit", "close"],
+  components: { PatchPolicyForm, CustomField },
   mixins: [mixins],
   data() {
     return {
-      agentLoaded: false,
-      clientsLoaded: false,
+      customFields: [],
+      custom_fields: {},
       agent: {},
       monTypes: ["server", "workstation"],
       client_options: [],
@@ -147,41 +167,60 @@ export default {
       tz_inherited: true,
       original_tz: null,
       allTimezones: [],
+      siteOptions: [],
     };
   },
   methods: {
     getAgentInfo() {
-      this.$axios.get(`/agents/${this.selectedAgentPk}/agenteditdetails/`).then(r => {
-        this.agent = r.data;
-        this.allTimezones = Object.freeze(r.data.all_timezones);
+      this.$axios
+        .get(`/agents/${this.selectedAgentPk}/agenteditdetails/`)
+        .then(r => {
+          this.agent = r.data;
+          this.allTimezones = Object.freeze(r.data.all_timezones);
 
-        // r.data.time_zone is the actual db column from the agent
-        // r.data.timezone is a computed property based on the db time_zone field
-        // which whill return null if the time_zone field is not set
-        // and is therefore inheriting from the default global setting
-        if (r.data.time_zone === null) {
-          this.timezone = r.data.timezone;
-          this.original_tz = r.data.timezone;
-        } else {
-          this.tz_inherited = false;
-          this.timezone = r.data.time_zone;
-          this.original_tz = r.data.time_zone;
-        }
+          // r.data.time_zone is the actual db column from the agent
+          // r.data.timezone is a computed property based on the db time_zone field
+          // which whill return null if the time_zone field is not set
+          // and is therefore inheriting from the default global setting
+          if (r.data.time_zone === null) {
+            this.timezone = r.data.timezone;
+            this.original_tz = r.data.timezone;
+          } else {
+            this.tz_inherited = false;
+            this.timezone = r.data.time_zone;
+            this.original_tz = r.data.time_zone;
+          }
 
-        this.agent.client = { label: r.data.client.name, id: r.data.client.id, sites: r.data.client.sites };
-        this.agentLoaded = true;
-      });
+          for (let field of this.customFields) {
+            const value = r.data.custom_fields.find(value => value.field === field.id);
+
+            if (field.type === "multiple") {
+              if (value) this.custom_fields[field.name] = value.value;
+              else this.custom_fields[field.name] = [];
+            } else if (field.type === "checkbox") {
+              if (value) this.custom_fields[field.name] = value.value;
+              else this.this.custom_fields[field.name] = false;
+            } else {
+              if (value) this.custom_fields[field.name] = value.value;
+              else this.custom_fields[field.name] = "";
+            }
+          }
+        })
+        .catch(e => {});
     },
-    getClientsSites() {
-      this.$axios.get("/clients/clients/").then(r => {
-        this.client_options = this.formatClientOptions(r.data);
-        this.clientsLoaded = true;
-      });
+    getSiteOptions() {
+      this.$axios
+        .get("/clients/clients/")
+        .then(r => {
+          r.data.forEach(client => {
+            this.siteOptions.push({ category: client.name });
+            client.sites.forEach(site => this.siteOptions.push({ label: site.name, value: site.id }));
+          });
+        })
+        .catch(e => {});
     },
     editAgent() {
       delete this.agent.all_timezones;
-      delete this.agent.client;
-      delete this.agent.sites;
       delete this.agent.timezone;
       delete this.agent.winupdatepolicy[0].created_by;
       delete this.agent.winupdatepolicy[0].created_time;
@@ -197,26 +236,28 @@ export default {
       }
 
       this.$axios
-        .patch("/agents/editagent/", this.agent)
+        .patch("/agents/editagent/", {
+          ...this.agent,
+          custom_fields: this.formatCustomFields(this.customFields, this.custom_fields),
+        })
         .then(r => {
           this.$emit("close");
-          this.$emit("edited");
+          this.$emit("edit");
           this.notifySuccess("Agent was edited!");
         })
-        .catch(() => this.notifyError("Something went wrong"));
+        .catch(e => {});
     },
   },
   computed: {
     ...mapGetters(["selectedAgentPk"]),
-    site_options() {
-      if (this.agentLoaded && this.clientsLoaded) {
-        return this.formatSiteOptions(this.agent.client["sites"]);
-      }
-    },
   },
-  created() {
+  mounted() {
+    // Get custom fields
+    this.getCustomFields("agent").then(r => {
+      this.customFields = r.data.filter(field => !field.hide_in_ui);
+    });
     this.getAgentInfo();
-    this.getClientsSites();
+    this.getSiteOptions();
   },
 };
 </script>

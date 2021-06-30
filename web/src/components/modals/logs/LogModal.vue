@@ -6,7 +6,7 @@
       <q-btn color="primary" text-color="white" label="Download log" @click="downloadLog" />
       <q-space />
       <q-btn dense flat icon="close" v-close-popup>
-        <q-tooltip content-class="bg-white text-primary">Close</q-tooltip>
+        <q-tooltip class="bg-white text-primary">Close</q-tooltip>
       </q-btn>
     </q-bar>
     <div class="q-pa-md row">
@@ -19,18 +19,27 @@
           v-model="agent"
           :options="agents"
           label="Filter Agent"
-          @input="getLog"
+          @update:model-value="getLog"
         />
       </div>
       <div class="col-1">
-        <q-select dark dense options-dense outlined v-model="order" :options="orders" label="Order" @input="getLog" />
+        <q-select
+          dark
+          dense
+          options-dense
+          outlined
+          v-model="order"
+          :options="orders"
+          label="Order"
+          @update:model-value="getLog"
+        />
       </div>
     </div>
     <q-card-section>
-      <q-radio dark v-model="loglevel" color="cyan" val="info" label="Info" @input="getLog" />
-      <q-radio dark v-model="loglevel" color="red" val="critical" label="Critical" @input="getLog" />
-      <q-radio dark v-model="loglevel" color="red" val="error" label="Error" @input="getLog" />
-      <q-radio dark v-model="loglevel" color="yellow" val="warning" label="Warning" @input="getLog" />
+      <q-radio dark v-model="loglevel" color="cyan" val="info" label="Info" @update:model-value="getLog" />
+      <q-radio dark v-model="loglevel" color="red" val="critical" label="Critical" @update:model-value="getLog" />
+      <q-radio dark v-model="loglevel" color="red" val="error" label="Error" @update:model-value="getLog" />
+      <q-radio dark v-model="loglevel" color="yellow" val="warning" label="Warning" @update:model-value="getLog" />
     </q-card-section>
     <q-separator />
     <q-card-section class="scroll" style="max-height: 80vh">
@@ -40,8 +49,6 @@
 </template>
 
 <script>
-import axios from "axios";
-import { mapState } from "vuex";
 export default {
   name: "LogModal",
   data() {
@@ -56,7 +63,7 @@ export default {
   },
   methods: {
     downloadLog() {
-      axios
+      this.$axios
         .get("/logs/downloadlog/", { responseType: "blob" })
         .then(({ data }) => {
           const blob = new Blob([data], { type: "text/plain" });
@@ -65,17 +72,20 @@ export default {
           link.download = "debug.log";
           link.click();
         })
-        .catch(error => console.error(error));
+        .catch(e => {});
     },
     getLog() {
-      axios.get(`/logs/debuglog/${this.loglevel}/${this.agent}/${this.order}/`).then(r => {
-        this.logContent = r.data.log;
-        this.agents = r.data.agents.map(k => k.hostname).sort();
-        this.agents.unshift("all");
-      });
+      this.$axios
+        .get(`/logs/debuglog/${this.loglevel}/${this.agent}/${this.order}/`)
+        .then(r => {
+          this.logContent = r.data.log;
+          this.agents = r.data.agents.map(k => k.hostname).sort();
+          this.agents.unshift("all");
+        })
+        .catch(e => {});
     },
   },
-  created() {
+  mounted() {
     this.getLog();
   },
 };

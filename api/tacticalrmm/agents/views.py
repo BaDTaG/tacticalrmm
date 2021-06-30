@@ -1,47 +1,62 @@
 import asyncio
-from loguru import logger
-import os
-import subprocess
-import pytz
 import datetime as dt
-from packaging import version as pyver
+import os
+import random
+import string
+import time
 
 from django.conf import settings
-from django.shortcuts import get_object_or_404
 from django.http import HttpResponse
-
-from rest_framework.decorators import api_view
-from rest_framework.views import APIView
+from django.shortcuts import get_object_or_404
+from loguru import logger
+from packaging import version as pyver
+from rest_framework import status
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from rest_framework import status, generics
+from rest_framework.views import APIView
 
-from .models import Agent, AgentOutage, RecoveryAction, Note
 from core.models import CoreSettings
+from logs.models import AuditLog, PendingAction
 from scripts.models import Script
-from logs.models import AuditLog
+from scripts.tasks import handle_bulk_command_task, handle_bulk_script_task
+from tacticalrmm.utils import get_default_timezone, notify_error, reload_nats
+from winupdate.serializers import WinUpdatePolicySerializer
+from winupdate.tasks import bulk_check_for_updates_task, bulk_install_updates_task
 
+from .models import Agent, AgentCustomField, Note, RecoveryAction
+from .permissions import (
+    EditAgentPerms,
+    EvtLogPerms,
+    InstallAgentPerms,
+    ManageNotesPerms,
+    ManageProcPerms,
+    MeshPerms,
+    RebootAgentPerms,
+    RunBulkPerms,
+    RunScriptPerms,
+    SendCMDPerms,
+    UninstallPerms,
+    UpdateAgentPerms,
+)
 from .serializers import (
-    AgentSerializer,
-    AgentHostnameSerializer,
-    AgentTableSerializer,
+    AgentCustomFieldSerializer,
     AgentEditSerializer,
+    AgentHostnameSerializer,
+    AgentOverdueActionSerializer,
+    AgentSerializer,
+    AgentTableSerializer,
     NoteSerializer,
     NotesSerializer,
 )
-from winupdate.serializers import WinUpdatePolicySerializer
-
-from .tasks import uninstall_agent_task, send_agent_update_task
-from winupdate.tasks import bulk_check_for_updates_task
-from scripts.tasks import handle_bulk_command_task, handle_bulk_script_task
-
-from tacticalrmm.utils import notify_error, reload_nats
+from .tasks import run_script_email_results_task, send_agent_update_task
 
 logger.configure(**settings.LOG_CONFIG)
 
 
 @api_view()
 def get_agent_versions(request):
-    agents = Agent.objects.only("pk")
+    agents = Agent.objects.prefetch_related("site").only("pk", "hostname")
     return Response(
         {
             "versions": [settings.LATEST_AGENT_VER],
@@ -51,63 +66,95 @@ def get_agent_versions(request):
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated, UpdateAgentPerms])
 def update_agents(request):
-    pks = request.data["pks"]
-    version = request.data["version"]
-    send_agent_update_task.delay(pks=pks, version=version)
+    q = Agent.objects.filter(pk__in=request.data["pks"]).only("pk", "version")
+    pks: list[int] = [
+        i.pk
+        for i in q
+        if pyver.parse(i.version) < pyver.parse(settings.LATEST_AGENT_VER)
+    ]
+    send_agent_update_task.delay(pks=pks)
     return Response("ok")
 
 
 @api_view()
+@permission_classes([IsAuthenticated, UninstallPerms])
 def ping(request, pk):
     agent = get_object_or_404(Agent, pk=pk)
     status = "offline"
-    if agent.has_nats:
-        r = asyncio.run(agent.nats_cmd({"func": "ping"}, timeout=5))
+    attempts = 0
+    while 1:
+        r = asyncio.run(agent.nats_cmd({"func": "ping"}, timeout=2))
         if r == "pong":
             status = "online"
-    else:
-        r = agent.salt_api_cmd(timeout=5, func="test.ping")
-        if isinstance(r, bool) and r:
-            status = "online"
+            break
+        else:
+            attempts += 1
+            time.sleep(1)
+
+        if attempts >= 5:
+            break
 
     return Response({"name": agent.hostname, "status": status})
 
 
 @api_view(["DELETE"])
+@permission_classes([IsAuthenticated, UninstallPerms])
 def uninstall(request):
     agent = get_object_or_404(Agent, pk=request.data["pk"])
-    if agent.has_nats:
-        asyncio.run(agent.nats_cmd({"func": "uninstall"}, wait=False))
-
-    salt_id = agent.salt_id
+    asyncio.run(agent.nats_cmd({"func": "uninstall"}, wait=False))
     name = agent.hostname
-    has_nats = agent.has_nats
     agent.delete()
     reload_nats()
-
-    uninstall_agent_task.delay(salt_id, has_nats)
     return Response(f"{name} will now be uninstalled.")
 
 
-@api_view(["PATCH"])
+@api_view(["PATCH", "PUT"])
+@permission_classes([IsAuthenticated, EditAgentPerms])
 def edit_agent(request):
     agent = get_object_or_404(Agent, pk=request.data["id"])
+
     a_serializer = AgentSerializer(instance=agent, data=request.data, partial=True)
     a_serializer.is_valid(raise_exception=True)
     a_serializer.save()
 
-    policy = agent.winupdatepolicy.get()
-    p_serializer = WinUpdatePolicySerializer(
-        instance=policy, data=request.data["winupdatepolicy"][0]
-    )
-    p_serializer.is_valid(raise_exception=True)
-    p_serializer.save()
+    if "winupdatepolicy" in request.data.keys():
+        policy = agent.winupdatepolicy.get()  # type: ignore
+        p_serializer = WinUpdatePolicySerializer(
+            instance=policy, data=request.data["winupdatepolicy"][0]
+        )
+        p_serializer.is_valid(raise_exception=True)
+        p_serializer.save()
+
+    if "custom_fields" in request.data.keys():
+
+        for field in request.data["custom_fields"]:
+
+            custom_field = field
+            custom_field["agent"] = agent.id  # type: ignore
+
+            if AgentCustomField.objects.filter(
+                field=field["field"], agent=agent.id  # type: ignore
+            ):
+                value = AgentCustomField.objects.get(
+                    field=field["field"], agent=agent.id  # type: ignore
+                )
+                serializer = AgentCustomFieldSerializer(
+                    instance=value, data=custom_field
+                )
+                serializer.is_valid(raise_exception=True)
+                serializer.save()
+            else:
+                serializer = AgentCustomFieldSerializer(data=custom_field)
+                serializer.is_valid(raise_exception=True)
+                serializer.save()
 
     return Response("ok")
 
 
 @api_view()
+@permission_classes([IsAuthenticated, MeshPerms])
 def meshcentral(request, pk):
     agent = get_object_or_404(Agent, pk=pk)
     core = CoreSettings.objects.first()
@@ -119,16 +166,9 @@ def meshcentral(request, pk):
     if token == "err":
         return notify_error("Invalid mesh token")
 
-    control = (
-        f"{core.mesh_site}/?login={token}&node={agent.mesh_node_id}&viewmode=11&hide=31"
-    )
-    terminal = (
-        f"{core.mesh_site}/?login={token}&node={agent.mesh_node_id}&viewmode=12&hide=31"
-    )
-    file = (
-        f"{core.mesh_site}/?login={token}&node={agent.mesh_node_id}&viewmode=13&hide=31"
-    )
-    webrdp = f"{core.mesh_site}/mstsc.html?login={token}&node={agent.mesh_node_id}"
+    control = f"{core.mesh_site}/?login={token}&gotonode={agent.mesh_node_id}&viewmode=11&hide=31"
+    terminal = f"{core.mesh_site}/?login={token}&gotonode={agent.mesh_node_id}&viewmode=12&hide=31"
+    file = f"{core.mesh_site}/?login={token}&gotonode={agent.mesh_node_id}&viewmode=13&hide=31"
 
     AuditLog.audit_mesh_session(username=request.user.username, hostname=agent.hostname)
 
@@ -137,7 +177,6 @@ def meshcentral(request, pk):
         "control": control,
         "terminal": terminal,
         "file": file,
-        "webrdp": webrdp,
         "status": agent.status,
         "client": agent.client.name,
         "site": agent.site.name,
@@ -154,21 +193,16 @@ def agent_detail(request, pk):
 @api_view()
 def get_processes(request, pk):
     agent = get_object_or_404(Agent, pk=pk)
-    if not agent.has_nats:
-        return notify_error("Requires agent version 1.1.0 or greater")
     r = asyncio.run(agent.nats_cmd(data={"func": "procs"}, timeout=5))
     if r == "timeout":
         return notify_error("Unable to contact the agent")
-
     return Response(r)
 
 
 @api_view()
+@permission_classes([IsAuthenticated, ManageProcPerms])
 def kill_proc(request, pk, pid):
     agent = get_object_or_404(Agent, pk=pk)
-    if not agent.has_nats:
-        return notify_error("Requires agent version 1.1.0 or greater")
-
     r = asyncio.run(
         agent.nats_cmd({"func": "killproc", "procpid": int(pid)}, timeout=15)
     )
@@ -182,19 +216,19 @@ def kill_proc(request, pk, pid):
 
 
 @api_view()
+@permission_classes([IsAuthenticated, EvtLogPerms])
 def get_event_log(request, pk, logtype, days):
     agent = get_object_or_404(Agent, pk=pk)
-    if not agent.has_nats:
-        return notify_error("Requires agent version 1.1.0 or greater")
+    timeout = 180 if logtype == "Security" else 30
     data = {
         "func": "eventlog",
-        "timeout": 30,
+        "timeout": timeout,
         "payload": {
             "logname": logtype,
             "days": str(days),
         },
     }
-    r = asyncio.run(agent.nats_cmd(data, timeout=32))
+    r = asyncio.run(agent.nats_cmd(data, timeout=timeout + 2))
     if r == "timeout":
         return notify_error("Unable to contact the agent")
 
@@ -202,23 +236,9 @@ def get_event_log(request, pk, logtype, days):
 
 
 @api_view(["POST"])
-def power_action(request):
-    agent = get_object_or_404(Agent, pk=request.data["pk"])
-    if not agent.has_nats:
-        return notify_error("Requires agent version 1.1.0 or greater")
-    if request.data["action"] == "rebootnow":
-        r = asyncio.run(agent.nats_cmd({"func": "rebootnow"}, timeout=10))
-        if r != "ok":
-            return notify_error("Unable to contact the agent")
-
-    return Response("ok")
-
-
-@api_view(["POST"])
+@permission_classes([IsAuthenticated, SendCMDPerms])
 def send_raw_cmd(request):
     agent = get_object_or_404(Agent, pk=request.data["pk"])
-    if not agent.has_nats:
-        return notify_error("Requires agent version 1.1.0 or greater")
     timeout = int(request.data["timeout"])
     data = {
         "func": "rawcmd",
@@ -243,36 +263,49 @@ def send_raw_cmd(request):
     return Response(r)
 
 
-class AgentsTableList(generics.ListAPIView):
-    queryset = (
-        Agent.objects.select_related("site")
-        .prefetch_related("agentchecks")
-        .only(
+class AgentsTableList(APIView):
+    def patch(self, request):
+        if "sitePK" in request.data.keys():
+            queryset = (
+                Agent.objects.select_related("site", "policy", "alert_template")
+                .prefetch_related("agentchecks")
+                .filter(site_id=request.data["sitePK"])
+            )
+        elif "clientPK" in request.data.keys():
+            queryset = (
+                Agent.objects.select_related("site", "policy", "alert_template")
+                .prefetch_related("agentchecks")
+                .filter(site__client_id=request.data["clientPK"])
+            )
+        else:
+            queryset = Agent.objects.select_related(
+                "site", "policy", "alert_template"
+            ).prefetch_related("agentchecks")
+
+        queryset = queryset.only(
             "pk",
             "hostname",
             "agent_id",
             "site",
+            "policy",
+            "alert_template",
             "monitoring_type",
             "description",
             "needs_reboot",
             "overdue_text_alert",
             "overdue_email_alert",
             "overdue_time",
+            "offline_time",
             "last_seen",
             "boot_time",
             "logged_in_username",
             "last_logged_in_user",
             "time_zone",
             "maintenance_mode",
+            "pending_actions_count",
+            "has_patches_pending",
         )
-    )
-    serializer_class = AgentTableSerializer
-
-    def list(self, request):
-        queryset = self.get_queryset()
-        ctx = {
-            "default_tz": pytz.timezone(CoreSettings.objects.first().default_time_zone)
-        }
+        ctx = {"default_tz": get_default_timezone()}
         serializer = AgentTableSerializer(queryset, many=True, context=ctx)
         return Response(serializer.data)
 
@@ -289,112 +322,77 @@ def agent_edit_details(request, pk):
     return Response(AgentEditSerializer(agent).data)
 
 
-@api_view()
-def by_client(request, clientpk):
-    agents = (
-        Agent.objects.select_related("site")
-        .filter(site__client_id=clientpk)
-        .prefetch_related("agentchecks")
-        .only(
-            "pk",
-            "hostname",
-            "agent_id",
-            "site",
-            "monitoring_type",
-            "description",
-            "needs_reboot",
-            "overdue_text_alert",
-            "overdue_email_alert",
-            "overdue_time",
-            "last_seen",
-            "boot_time",
-            "logged_in_username",
-            "last_logged_in_user",
-            "time_zone",
-            "maintenance_mode",
-        )
-    )
-    ctx = {"default_tz": pytz.timezone(CoreSettings.objects.first().default_time_zone)}
-    return Response(AgentTableSerializer(agents, many=True, context=ctx).data)
-
-
-@api_view()
-def by_site(request, sitepk):
-    agents = (
-        Agent.objects.filter(site_id=sitepk)
-        .select_related("site")
-        .prefetch_related("agentchecks")
-        .only(
-            "pk",
-            "hostname",
-            "agent_id",
-            "site",
-            "monitoring_type",
-            "description",
-            "needs_reboot",
-            "overdue_text_alert",
-            "overdue_email_alert",
-            "overdue_time",
-            "last_seen",
-            "boot_time",
-            "logged_in_username",
-            "last_logged_in_user",
-            "time_zone",
-            "maintenance_mode",
-        )
-    )
-    ctx = {"default_tz": pytz.timezone(CoreSettings.objects.first().default_time_zone)}
-    return Response(AgentTableSerializer(agents, many=True, context=ctx).data)
-
-
 @api_view(["POST"])
 def overdue_action(request):
-    pk = request.data["pk"]
-    alert_type = request.data["alertType"]
-    action = request.data["action"]
-    agent = get_object_or_404(Agent, pk=pk)
-    if alert_type == "email" and action == "enabled":
-        agent.overdue_email_alert = True
-        agent.save(update_fields=["overdue_email_alert"])
-    elif alert_type == "email" and action == "disabled":
-        agent.overdue_email_alert = False
-        agent.save(update_fields=["overdue_email_alert"])
-    elif alert_type == "text" and action == "enabled":
-        agent.overdue_text_alert = True
-        agent.save(update_fields=["overdue_text_alert"])
-    elif alert_type == "text" and action == "disabled":
-        agent.overdue_text_alert = False
-        agent.save(update_fields=["overdue_text_alert"])
-    else:
-        return Response(
-            {"error": "Something went wrong"}, status=status.HTTP_400_BAD_REQUEST
-        )
+    agent = get_object_or_404(Agent, pk=request.data["pk"])
+    serializer = AgentOverdueActionSerializer(
+        instance=agent, data=request.data, partial=True
+    )
+    serializer.is_valid(raise_exception=True)
+    serializer.save()
     return Response(agent.hostname)
 
 
+class Reboot(APIView):
+    permission_classes = [IsAuthenticated, RebootAgentPerms]
+    # reboot now
+    def post(self, request):
+        agent = get_object_or_404(Agent, pk=request.data["pk"])
+        r = asyncio.run(agent.nats_cmd({"func": "rebootnow"}, timeout=10))
+        if r != "ok":
+            return notify_error("Unable to contact the agent")
+
+        return Response("ok")
+
+    # reboot later
+    def patch(self, request):
+        agent = get_object_or_404(Agent, pk=request.data["pk"])
+
+        try:
+            obj = dt.datetime.strptime(request.data["datetime"], "%Y-%m-%d %H:%M")
+        except Exception:
+            return notify_error("Invalid date")
+
+        task_name = "TacticalRMM_SchedReboot_" + "".join(
+            random.choice(string.ascii_letters) for _ in range(10)
+        )
+
+        nats_data = {
+            "func": "schedtask",
+            "schedtaskpayload": {
+                "type": "schedreboot",
+                "deleteafter": True,
+                "trigger": "once",
+                "name": task_name,
+                "year": int(dt.datetime.strftime(obj, "%Y")),
+                "month": dt.datetime.strftime(obj, "%B"),
+                "day": int(dt.datetime.strftime(obj, "%d")),
+                "hour": int(dt.datetime.strftime(obj, "%H")),
+                "min": int(dt.datetime.strftime(obj, "%M")),
+            },
+        }
+
+        r = asyncio.run(agent.nats_cmd(nats_data, timeout=10))
+        if r != "ok":
+            return notify_error(r)
+
+        details = {"taskname": task_name, "time": str(obj)}
+        PendingAction.objects.create(
+            agent=agent, action_type="schedreboot", details=details
+        )
+        nice_time = dt.datetime.strftime(obj, "%B %d, %Y at %I:%M %p")
+        return Response(
+            {"time": nice_time, "agent": agent.hostname, "task_name": task_name}
+        )
+
+
 @api_view(["POST"])
-def reboot_later(request):
-    agent = get_object_or_404(Agent, pk=request.data["pk"])
-    date_time = request.data["datetime"]
-
-    try:
-        obj = dt.datetime.strptime(date_time, "%Y-%m-%d %H:%M")
-    except Exception:
-        return notify_error("Invalid date")
-
-    r = agent.schedule_reboot(obj)
-
-    if r == "timeout":
-        return notify_error("Unable to contact the agent")
-    elif r == "failed":
-        return notify_error("Something went wrong")
-
-    return Response(r["msg"])
-
-
-@api_view(["POST"])
+@permission_classes([IsAuthenticated, InstallAgentPerms])
 def install_agent(request):
     from knox.models import AuthToken
+    from accounts.models import User
+
+    from agents.utils import get_winagent_url
 
     client_id = request.data["client"]
     site_id = request.data["site"]
@@ -416,131 +414,29 @@ def install_agent(request):
     inno = (
         f"winagent-v{version}.exe" if arch == "64" else f"winagent-v{version}-x86.exe"
     )
-    download_url = settings.DL_64 if arch == "64" else settings.DL_32
+    download_url = get_winagent_url(arch)
+
+    installer_user = User.objects.filter(is_installer_user=True).first()
 
     _, token = AuthToken.objects.create(
-        user=request.user, expiry=dt.timedelta(hours=request.data["expires"])
+        user=installer_user, expiry=dt.timedelta(hours=request.data["expires"])
     )
 
     if request.data["installMethod"] == "exe":
-        go_bin = "/usr/local/rmmgo/go/bin/go"
+        from tacticalrmm.utils import generate_winagent_exe
 
-        if not os.path.exists(go_bin):
-            return Response("nogolang", status=status.HTTP_409_CONFLICT)
-
-        api = request.data["api"]
-        atype = request.data["agenttype"]
-        rdp = request.data["rdp"]
-        ping = request.data["ping"]
-        power = request.data["power"]
-
-        file_name = "rmm-installer.exe"
-        exe = os.path.join(settings.EXE_DIR, file_name)
-
-        if os.path.exists(exe):
-            try:
-                os.remove(exe)
-            except Exception as e:
-                logger.error(str(e))
-
-        goarch = "amd64" if arch == "64" else "386"
-        cmd = [
-            "env",
-            "GOOS=windows",
-            f"GOARCH={goarch}",
-            go_bin,
-            "build",
-            f"-ldflags=\"-X 'main.Inno={inno}'",
-            f"-X 'main.Api={api}'",
-            f"-X 'main.Client={client_id}'",
-            f"-X 'main.Site={site_id}'",
-            f"-X 'main.Atype={atype}'",
-            f"-X 'main.Rdp={rdp}'",
-            f"-X 'main.Ping={ping}'",
-            f"-X 'main.Power={power}'",
-            f"-X 'main.DownloadUrl={download_url}'",
-            f"-X 'main.Token={token}'\"",
-            "-o",
-            exe,
-        ]
-
-        build_error = False
-        gen_error = False
-
-        gen = [
-            "env",
-            "GOOS=windows",
-            f"GOARCH={goarch}",
-            go_bin,
-            "generate",
-        ]
-        try:
-            r1 = subprocess.run(
-                " ".join(gen),
-                capture_output=True,
-                shell=True,
-                cwd=os.path.join(settings.BASE_DIR, "core/goinstaller"),
-            )
-        except Exception as e:
-            gen_error = True
-            logger.error(str(e))
-            return Response(
-                "genfailed", status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
-            )
-
-        if r1.returncode != 0:
-            gen_error = True
-            if r1.stdout:
-                logger.error(r1.stdout.decode("utf-8", errors="ignore"))
-
-            if r1.stderr:
-                logger.error(r1.stderr.decode("utf-8", errors="ignore"))
-
-            logger.error(f"Go build failed with return code {r1.returncode}")
-
-        if gen_error:
-            return Response(
-                "genfailed", status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
-            )
-
-        try:
-            r = subprocess.run(
-                " ".join(cmd),
-                capture_output=True,
-                shell=True,
-                cwd=os.path.join(settings.BASE_DIR, "core/goinstaller"),
-            )
-        except Exception as e:
-            build_error = True
-            logger.error(str(e))
-            return Response("buildfailed", status=status.HTTP_412_PRECONDITION_FAILED)
-
-        if r.returncode != 0:
-            build_error = True
-            if r.stdout:
-                logger.error(r.stdout.decode("utf-8", errors="ignore"))
-
-            if r.stderr:
-                logger.error(r.stderr.decode("utf-8", errors="ignore"))
-
-            logger.error(f"Go build failed with return code {r.returncode}")
-
-        if build_error:
-            return Response("buildfailed", status=status.HTTP_412_PRECONDITION_FAILED)
-
-        if settings.DEBUG:
-            with open(exe, "rb") as f:
-                response = HttpResponse(
-                    f.read(),
-                    content_type="application/vnd.microsoft.portable-executable",
-                )
-                response["Content-Disposition"] = f"inline; filename={file_name}"
-                return response
-        else:
-            response = HttpResponse()
-            response["Content-Disposition"] = f"attachment; filename={file_name}"
-            response["X-Accel-Redirect"] = f"/private/exe/{file_name}"
-            return response
+        return generate_winagent_exe(
+            client=client_id,
+            site=site_id,
+            agent_type=request.data["agenttype"],
+            rdp=request.data["rdp"],
+            ping=request.data["ping"],
+            power=request.data["power"],
+            arch=arch,
+            token=token,
+            api=request.data["api"],
+            file_name=request.data["fileName"],
+        )
 
     elif request.data["installMethod"] == "manual":
         cmd = [
@@ -548,12 +444,10 @@ def install_agent(request):
             "/VERYSILENT",
             "/SUPPRESSMSGBOXES",
             "&&",
-            "timeout",
-            "/t",
-            "10",
-            "/nobreak",
-            ">",
-            "NUL",
+            "ping",
+            "127.0.0.1",
+            "-n",
+            "5",
             "&&",
             r'"C:\Program Files\TacticalAgent\tacticalrmm.exe"',
             "-m",
@@ -580,8 +474,6 @@ def install_agent(request):
         resp = {
             "cmd": " ".join(str(i) for i in cmd),
             "url": download_url,
-            "salt64": settings.SALT_64,
-            "salt32": settings.SALT_32,
         }
 
         return Response(resp)
@@ -638,27 +530,14 @@ def recover(request):
     agent = get_object_or_404(Agent, pk=request.data["pk"])
     mode = request.data["mode"]
 
-    if pyver.parse(agent.version) <= pyver.parse("0.9.5"):
-        return notify_error("Only available in agent version greater than 0.9.5")
+    # attempt a realtime recovery, otherwise fall back to old recovery method
+    if mode == "tacagent" or mode == "mesh":
+        data = {"func": "recover", "payload": {"mode": mode}}
+        r = asyncio.run(agent.nats_cmd(data, timeout=10))
+        if r == "ok":
+            return Response("Successfully completed recovery")
 
-    if not agent.has_nats:
-        if mode == "tacagent" or mode == "checkrunner" or mode == "rpc":
-            return notify_error("Requires agent version 1.1.0 or greater")
-
-    # attempt a realtime recovery if supported, otherwise fall back to old recovery method
-    if agent.has_nats:
-        if (
-            mode == "tacagent"
-            or mode == "checkrunner"
-            or mode == "salt"
-            or mode == "mesh"
-        ):
-            data = {"func": "recover", "payload": {"mode": mode}}
-            r = asyncio.run(agent.nats_cmd(data, timeout=10))
-            if r == "ok":
-                return Response("Successfully completed recovery")
-
-    if agent.recoveryactions.filter(last_run=None).exists():
+    if agent.recoveryactions.filter(last_run=None).exists():  # type: ignore
         return notify_error(
             "A recovery action is currently pending. Please wait for the next agent check-in."
         )
@@ -684,12 +563,12 @@ def recover(request):
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated, RunScriptPerms])
 def run_script(request):
     agent = get_object_or_404(Agent, pk=request.data["pk"])
-    if not agent.has_nats:
-        return notify_error("Requires agent version 1.1.0 or greater")
     script = get_object_or_404(Script, pk=request.data["scriptPK"])
     output = request.data["output"]
+    args = request.data["args"]
     req_timeout = int(request.data["timeout"]) + 3
 
     AuditLog.audit_script_run(
@@ -698,32 +577,34 @@ def run_script(request):
         script=script.name,
     )
 
-    data = {
-        "func": "runscript",
-        "timeout": request.data["timeout"],
-        "script_args": request.data["args"],
-        "payload": {
-            "code": script.code,
-            "shell": script.shell,
-        },
-    }
-
     if output == "wait":
-        r = asyncio.run(agent.nats_cmd(data, timeout=req_timeout))
+        r = agent.run_script(
+            scriptpk=script.pk, args=args, timeout=req_timeout, wait=True
+        )
         return Response(r)
+
+    elif output == "email":
+        emails = (
+            [] if request.data["emailmode"] == "default" else request.data["emails"]
+        )
+        run_script_email_results_task.delay(
+            agentpk=agent.pk,
+            scriptpk=script.pk,
+            nats_timeout=req_timeout,
+            emails=emails,
+            args=args,
+        )
     else:
-        asyncio.run(agent.nats_cmd(data, wait=False))
-        return Response(f"{script.name} will now be run on {agent.hostname}")
+        agent.run_script(scriptpk=script.pk, args=args, timeout=req_timeout)
+
+    return Response(f"{script.name} will now be run on {agent.hostname}")
 
 
 @api_view()
 def recover_mesh(request, pk):
     agent = get_object_or_404(Agent, pk=pk)
-    if not agent.has_nats:
-        return notify_error("Requires agent version 1.1.0 or greater")
-
     data = {"func": "recover", "payload": {"mode": "mesh"}}
-    r = asyncio.run(agent.nats_cmd(data, timeout=45))
+    r = asyncio.run(agent.nats_cmd(data, timeout=90))
     if r != "ok":
         return notify_error("Unable to contact the agent")
 
@@ -765,6 +646,8 @@ class GetAddNotes(APIView):
 
 
 class GetEditDeleteNote(APIView):
+    permission_classes = [IsAuthenticated, ManageNotesPerms]
+
     def get(self, request, pk):
         note = get_object_or_404(Note, pk=pk)
         return Response(NoteSerializer(note).data)
@@ -783,6 +666,7 @@ class GetEditDeleteNote(APIView):
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated, RunBulkPerms])
 def bulk(request):
     if request.data["target"] == "agents" and not request.data["agentPKs"]:
         return notify_error("Must select at least 1 agent")
@@ -794,12 +678,16 @@ def bulk(request):
     elif request.data["target"] == "agents":
         q = Agent.objects.filter(pk__in=request.data["agentPKs"])
     elif request.data["target"] == "all":
-        q = Agent.objects.all()
+        q = Agent.objects.only("pk", "monitoring_type")
     else:
         return notify_error("Something went wrong")
 
-    minions = [agent.salt_id for agent in q]
-    agents = [agent.pk for agent in q]
+    if request.data["monType"] == "servers":
+        q = q.filter(monitoring_type="server")
+    elif request.data["monType"] == "workstations":
+        q = q.filter(monitoring_type="workstation")
+
+    agents: list[int] = [agent.pk for agent in q]
 
     AuditLog.audit_bulk_action(request.user, request.data["mode"], request.data)
 
@@ -817,37 +705,15 @@ def bulk(request):
         return Response(f"{script.name} will now be run on {len(agents)} agents")
 
     elif request.data["mode"] == "install":
-        r = Agent.salt_batch_async(minions=minions, func="win_agent.install_updates")
-        if r == "timeout":
-            return notify_error("Salt API not running")
+        bulk_install_updates_task.delay(agents)
         return Response(
             f"Pending updates will now be installed on {len(agents)} agents"
         )
     elif request.data["mode"] == "scan":
-        bulk_check_for_updates_task.delay(minions=minions)
+        bulk_check_for_updates_task.delay(agents)
         return Response(f"Patch status scan will now run on {len(agents)} agents")
 
     return notify_error("Something went wrong")
-
-
-@api_view(["POST"])
-def agent_counts(request):
-    return Response(
-        {
-            "total_server_count": Agent.objects.filter(
-                monitoring_type="server"
-            ).count(),
-            "total_server_offline_count": AgentOutage.objects.filter(
-                recovery_time=None, agent__monitoring_type="server"
-            ).count(),
-            "total_workstation_count": Agent.objects.filter(
-                monitoring_type="workstation"
-            ).count(),
-            "total_workstation_offline_count": AgentOutage.objects.filter(
-                recovery_time=None, agent__monitoring_type="workstation"
-            ).count(),
-        }
-    )
 
 
 @api_view(["POST"])
@@ -871,3 +737,12 @@ def agent_maintenance(request):
         return notify_error("Invalid data")
 
     return Response("ok")
+
+
+class WMI(APIView):
+    def get(self, request, pk):
+        agent = get_object_or_404(Agent, pk=pk)
+        r = asyncio.run(agent.nats_cmd({"func": "sysinfo"}, timeout=20))
+        if r != "ok":
+            return notify_error("Unable to contact the agent")
+        return Response("ok")

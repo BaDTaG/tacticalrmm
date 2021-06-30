@@ -1,19 +1,20 @@
+import json
+import os
 import random
 import string
-import os
-import json
-
-from model_bakery.recipe import Recipe, seq
 from itertools import cycle
-from django.utils import timezone as djangotime
-from django.conf import settings
 
-from .models import Agent
+from django.conf import settings
+from django.utils import timezone as djangotime
+from model_bakery.recipe import Recipe, foreign_key, seq
 
 
 def generate_agent_id(hostname):
     rand = "".join(random.choice(string.ascii_letters) for _ in range(35))
     return f"{rand}-{hostname}"
+
+
+site = Recipe("clients.Site")
 
 
 def get_wmi_data():
@@ -24,12 +25,12 @@ def get_wmi_data():
 
 
 agent = Recipe(
-    Agent,
+    "agents.Agent",
+    site=foreign_key(site),
     hostname="DESKTOP-TEST123",
-    version="1.1.0",
+    version="1.3.0",
     monitoring_type=cycle(["workstation", "server"]),
-    salt_id=generate_agent_id("DESKTOP-TEST123"),
-    agent_id="71AHC-AA813-HH1BC-AAHH5-00013|DESKTOP-TEST123",
+    agent_id=seq("asdkj3h4234-1234hg3h4g34-234jjh34|DESKTOP-TEST123"),
 )
 
 server_agent = agent.extend(
@@ -42,8 +43,12 @@ workstation_agent = agent.extend(
 
 online_agent = agent.extend(last_seen=djangotime.now())
 
+offline_agent = agent.extend(
+    last_seen=djangotime.now() - djangotime.timedelta(minutes=7)
+)
+
 overdue_agent = agent.extend(
-    last_seen=djangotime.now() - djangotime.timedelta(minutes=6)
+    last_seen=djangotime.now() - djangotime.timedelta(minutes=35)
 )
 
 agent_with_services = agent.extend(

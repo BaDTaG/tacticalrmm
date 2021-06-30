@@ -1,42 +1,94 @@
 from rest_framework.serializers import ModelSerializer, ReadOnlyField, ValidationError
-from .models import Client, Site, Deployment
+
+from .models import Client, ClientCustomField, Deployment, Site, SiteCustomField
+
+
+class SiteCustomFieldSerializer(ModelSerializer):
+    class Meta:
+        model = SiteCustomField
+        fields = (
+            "id",
+            "field",
+            "site",
+            "value",
+            "string_value",
+            "bool_value",
+            "multiple_value",
+        )
+        extra_kwargs = {
+            "string_value": {"write_only": True},
+            "bool_value": {"write_only": True},
+            "multiple_value": {"write_only": True},
+        }
 
 
 class SiteSerializer(ModelSerializer):
     client_name = ReadOnlyField(source="client.name")
+    custom_fields = SiteCustomFieldSerializer(many=True, read_only=True)
+    agent_count = ReadOnlyField()
 
     class Meta:
         model = Site
-        fields = "__all__"
+        fields = (
+            "id",
+            "name",
+            "server_policy",
+            "workstation_policy",
+            "alert_template",
+            "client_name",
+            "client",
+            "custom_fields",
+            "agent_count",
+            "block_policy_inheritance",
+        )
 
     def validate(self, val):
-        if "|" in val["name"]:
+        if "name" in val.keys() and "|" in val["name"]:
             raise ValidationError("Site name cannot contain the | character")
-
-        if self.context:
-            client = Client.objects.get(pk=self.context["clientpk"])
-            if Site.objects.filter(client=client, name=val["name"]).exists():
-                raise ValidationError(f"Site {val['name']} already exists")
 
         return val
 
 
+class ClientCustomFieldSerializer(ModelSerializer):
+    class Meta:
+        model = ClientCustomField
+        fields = (
+            "id",
+            "field",
+            "client",
+            "value",
+            "string_value",
+            "bool_value",
+            "multiple_value",
+        )
+        extra_kwargs = {
+            "string_value": {"write_only": True},
+            "bool_value": {"write_only": True},
+            "multiple_value": {"write_only": True},
+        }
+
+
 class ClientSerializer(ModelSerializer):
     sites = SiteSerializer(many=True, read_only=True)
+    custom_fields = ClientCustomFieldSerializer(many=True, read_only=True)
+    agent_count = ReadOnlyField()
 
     class Meta:
         model = Client
-        fields = "__all__"
+        fields = (
+            "id",
+            "name",
+            "server_policy",
+            "workstation_policy",
+            "alert_template",
+            "block_policy_inheritance",
+            "sites",
+            "custom_fields",
+            "agent_count",
+        )
 
     def validate(self, val):
-
-        if "site" in self.context:
-            if "|" in self.context["site"]:
-                raise ValidationError("Site name cannot contain the | character")
-            if len(self.context["site"]) > 255:
-                raise ValidationError("Site name too long")
-
-        if "|" in val["name"]:
+        if "name" in val.keys() and "|" in val["name"]:
             raise ValidationError("Client name cannot contain the | character")
 
         return val
@@ -49,7 +101,6 @@ class SiteTreeSerializer(ModelSerializer):
     class Meta:
         model = Site
         fields = "__all__"
-        ordering = ("failing_checks",)
 
 
 class ClientTreeSerializer(ModelSerializer):
@@ -60,7 +111,6 @@ class ClientTreeSerializer(ModelSerializer):
     class Meta:
         model = Client
         fields = "__all__"
-        ordering = ("failing_checks",)
 
 
 class DeploymentSerializer(ModelSerializer):
@@ -82,4 +132,5 @@ class DeploymentSerializer(ModelSerializer):
             "arch",
             "expiry",
             "install_flags",
+            "created",
         ]

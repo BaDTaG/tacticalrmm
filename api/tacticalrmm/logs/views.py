@@ -1,30 +1,44 @@
+import asyncio
 import subprocess
-
-from django.conf import settings
-from django.shortcuts import get_object_or_404
-from django.http import HttpResponse
-from django.utils import timezone as djangotime
-from django.db.models import Q
 from datetime import datetime as dt
 
-from rest_framework.response import Response
+from django.conf import settings
+from django.core.paginator import Paginator
+from django.db.models import Q
+from django.http import HttpResponse
+from django.shortcuts import get_object_or_404
+from django.utils import timezone as djangotime
 from rest_framework import status
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import PendingAction, AuditLog
-from agents.models import Agent
 from accounts.models import User
-from .serializers import PendingActionSerializer, AuditLogSerializer
-from agents.serializers import AgentHostnameSerializer
 from accounts.serializers import UserSerializer
-from .tasks import cancel_pending_action_task
+from agents.models import Agent
+from agents.serializers import AgentHostnameSerializer
+from tacticalrmm.utils import notify_error
+
+from .models import AuditLog, PendingAction
+from .permissions import AuditLogPerms, DebugLogPerms, ManagePendingActionPerms
+from .serializers import AuditLogSerializer, PendingActionSerializer
 
 
 class GetAuditLogs(APIView):
+    permission_classes = [IsAuthenticated, AuditLogPerms]
+
     def patch(self, request):
-        from clients.models import Client
         from agents.models import Agent
+        from clients.models import Client
+
+        pagination = request.data["pagination"]
+
+        order_by = (
+            f"-{pagination['sortBy']}"
+            if pagination["descending"]
+            else f"{pagination['sortBy']}"
+        )
 
         agentFilter = Q()
         clientFilter = Q()
@@ -67,12 +81,23 @@ class GetAuditLogs(APIView):
             .filter(actionFilter)
             .filter(objectFilter)
             .filter(timeFilter)
-        )
+        ).order_by(order_by)
 
-        return Response(AuditLogSerializer(audit_logs, many=True).data)
+        paginator = Paginator(audit_logs, pagination["rowsPerPage"])
+
+        return Response(
+            {
+                "audit_logs": AuditLogSerializer(
+                    paginator.get_page(pagination["page"]), many=True
+                ).data,
+                "total": paginator.count,
+            }
+        )
 
 
 class FilterOptionsAuditLog(APIView):
+    permission_classes = [IsAuthenticated, AuditLogPerms]
+
     def post(self, request):
         if request.data["type"] == "agent":
             agents = Agent.objects.filter(hostname__icontains=request.data["pattern"])
@@ -80,41 +105,65 @@ class FilterOptionsAuditLog(APIView):
 
         if request.data["type"] == "user":
             users = User.objects.filter(
-                username__icontains=request.data["pattern"], agent=None
+                username__icontains=request.data["pattern"],
+                agent=None,
+                is_installer_user=False,
             )
             return Response(UserSerializer(users, many=True).data)
 
         return Response("error", status=status.HTTP_400_BAD_REQUEST)
 
 
-@api_view()
-def agent_pending_actions(request, pk):
-    action = PendingAction.objects.filter(agent__pk=pk)
-    return Response(PendingActionSerializer(action, many=True).data)
+class PendingActions(APIView):
+    permission_classes = [IsAuthenticated, ManagePendingActionPerms]
+
+    def patch(self, request):
+        status_filter = "completed" if request.data["showCompleted"] else "pending"
+        if "agentPK" in request.data.keys():
+            actions = PendingAction.objects.filter(
+                agent__pk=request.data["agentPK"], status=status_filter
+            )
+            total = PendingAction.objects.filter(
+                agent__pk=request.data["agentPK"]
+            ).count()
+            completed = PendingAction.objects.filter(
+                agent__pk=request.data["agentPK"], status="completed"
+            ).count()
+
+        else:
+            actions = PendingAction.objects.filter(status=status_filter).select_related(
+                "agent"
+            )
+            total = PendingAction.objects.count()
+            completed = PendingAction.objects.filter(status="completed").count()
+
+        ret = {
+            "actions": PendingActionSerializer(actions, many=True).data,
+            "completed_count": completed,
+            "total": total,
+        }
+        return Response(ret)
+
+    def delete(self, request):
+        action = get_object_or_404(PendingAction, pk=request.data["pk"])
+        nats_data = {
+            "func": "delschedtask",
+            "schedtaskpayload": {"name": action.details["taskname"]},
+        }
+        r = asyncio.run(action.agent.nats_cmd(nats_data, timeout=10))
+        if r != "ok":
+            return notify_error(r)
+
+        action.delete()
+        return Response(f"{action.agent.hostname}: {action.description} was cancelled")
 
 
 @api_view()
-def all_pending_actions(request):
-    actions = PendingAction.objects.all()
-    return Response(PendingActionSerializer(actions, many=True).data)
-
-
-@api_view(["DELETE"])
-def cancel_pending_action(request):
-    action = get_object_or_404(PendingAction, pk=request.data["pk"])
-    data = PendingActionSerializer(action).data
-    cancel_pending_action_task.delay(data)
-    action.delete()
-    return Response(
-        f"{action.agent.hostname}: {action.description} will be cancelled shortly"
-    )
-
-
-@api_view()
+@permission_classes([IsAuthenticated, DebugLogPerms])
 def debug_log(request, mode, hostname, order):
     log_file = settings.LOG_CONFIG["handlers"][0]["sink"]
 
-    agents = Agent.objects.all()
+    agents = Agent.objects.prefetch_related("site").only("pk", "hostname")
     agent_hostnames = AgentHostnameSerializer(agents, many=True)
 
     switch_mode = {
@@ -153,6 +202,7 @@ def debug_log(request, mode, hostname, order):
 
 
 @api_view()
+@permission_classes([IsAuthenticated, DebugLogPerms])
 def download_log(request):
     log_file = settings.LOG_CONFIG["handlers"][0]["sink"]
     if settings.DEBUG:

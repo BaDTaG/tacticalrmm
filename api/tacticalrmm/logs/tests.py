@@ -1,8 +1,10 @@
 from datetime import datetime, timedelta
-from model_bakery import baker, seq
-from tacticalrmm.test import TacticalTestCase
-from .serializers import PendingActionSerializer
 from unittest.mock import patch
+
+from model_bakery import baker, seq
+
+from logs.models import PendingAction
+from tacticalrmm.test import TacticalTestCase
 
 
 class TestAuditViews(TacticalTestCase):
@@ -122,18 +124,33 @@ class TestAuditViews(TacticalTestCase):
             {"filter": {"clientFilter": [site.client.id]}, "count": 23},
         ]
 
+        pagination = {
+            "rowsPerPage": 25,
+            "page": 1,
+            "sortBy": "entry_time",
+            "descending": True,
+        }
+
         for req in data:
-            resp = self.client.patch(url, req["filter"], format="json")
+            resp = self.client.patch(
+                url, {**req["filter"], "pagination": pagination}, format="json"
+            )
             self.assertEqual(resp.status_code, 200)
-            self.assertEqual(len(resp.data), req["count"])
+            self.assertEqual(
+                len(resp.data["audit_logs"]),
+                pagination["rowsPerPage"]
+                if req["count"] > pagination["rowsPerPage"]
+                else req["count"],
+            )
+            self.assertEqual(resp.data["total"], req["count"])
 
         self.check_not_authenticated("patch", url)
 
     def test_options_filter(self):
         url = "/logs/auditlogs/optionsfilter/"
 
-        baker.make("agents.Agent", hostname=seq("AgentHostname"), _quantity=5)
-        baker.make("agents.Agent", hostname=seq("Server"), _quantity=3)
+        baker.make_recipe("agents.agent", hostname=seq("AgentHostname"), _quantity=5)
+        baker.make_recipe("agents.agent", hostname=seq("Server"), _quantity=3)
         baker.make("accounts.User", username=seq("Username"), _quantity=7)
         baker.make("accounts.User", username=seq("soemthing"), _quantity=3)
 
@@ -159,85 +176,97 @@ class TestAuditViews(TacticalTestCase):
 
         self.check_not_authenticated("post", url)
 
-    def test_agent_pending_actions(self):
-        agent = baker.make_recipe("agents.agent")
-        pending_actions = baker.make(
+    def test_get_pending_actions(self):
+        url = "/logs/pendingactions/"
+        agent1 = baker.make_recipe("agents.online_agent")
+        agent2 = baker.make_recipe("agents.online_agent")
+
+        baker.make(
+            "logs.PendingAction",
+            agent=agent1,
+            action_type="chocoinstall",
+            details={"name": "googlechrome", "output": None, "installed": False},
+            _quantity=12,
+        )
+        baker.make(
+            "logs.PendingAction",
+            agent=agent2,
+            action_type="chocoinstall",
+            status="completed",
+            details={"name": "adobereader", "output": None, "installed": False},
+            _quantity=14,
+        )
+
+        data = {"showCompleted": False}
+        r = self.client.patch(url, data, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(r.data["actions"]), 12)  # type: ignore
+        self.assertEqual(r.data["completed_count"], 14)  # type: ignore
+        self.assertEqual(r.data["total"], 26)  # type: ignore
+
+        PendingAction.objects.filter(action_type="chocoinstall").update(
+            status="completed"
+        )
+        data = {"showCompleted": True}
+        r = self.client.patch(url, data, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(r.data["actions"]), 26)  # type: ignore
+        self.assertEqual(r.data["completed_count"], 26)  # type: ignore
+        self.assertEqual(r.data["total"], 26)  # type: ignore
+
+        data = {"showCompleted": True, "agentPK": agent1.pk}
+        r = self.client.patch(url, data, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(r.data["actions"]), 12)  # type: ignore
+        self.assertEqual(r.data["completed_count"], 12)  # type: ignore
+        self.assertEqual(r.data["total"], 12)  # type: ignore
+
+        self.check_not_authenticated("patch", url)
+
+    @patch("agents.models.Agent.nats_cmd")
+    def test_cancel_pending_action(self, nats_cmd):
+        nats_cmd.return_value = "ok"
+        url = "/logs/pendingactions/"
+        agent = baker.make_recipe("agents.online_agent")
+        action = baker.make(
             "logs.PendingAction",
             agent=agent,
-            _quantity=6,
+            action_type="schedreboot",
+            details={
+                "time": "2021-01-13 18:20:00",
+                "taskname": "TacticalRMM_SchedReboot_wYzCCDVXlc",
+            },
         )
-        url = f"/logs/{agent.pk}/pendingactions/"
 
-        resp = self.client.get(url, format="json")
-        serializer = PendingActionSerializer(pending_actions, many=True)
+        data = {"pk": action.pk}  # type: ignore
+        r = self.client.delete(url, data, format="json")
+        self.assertEqual(r.status_code, 200)
+        nats_data = {
+            "func": "delschedtask",
+            "schedtaskpayload": {"name": "TacticalRMM_SchedReboot_wYzCCDVXlc"},
+        }
+        nats_cmd.assert_called_with(nats_data, timeout=10)
 
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(len(resp.data), 6)
-        self.assertEqual(resp.data, serializer.data)
+        # try request again and it should 404 since pending action doesn't exist
+        r = self.client.delete(url, data, format="json")
+        self.assertEqual(r.status_code, 404)
 
-        self.check_not_authenticated("get", url)
+        nats_cmd.reset_mock()
 
-    def test_all_pending_actions(self):
-        url = "/logs/allpendingactions/"
-        pending_actions = baker.make("logs.PendingAction", _quantity=6)
+        action2 = baker.make(
+            "logs.PendingAction",
+            agent=agent,
+            action_type="schedreboot",
+            details={
+                "time": "2021-01-13 18:20:00",
+                "taskname": "TacticalRMM_SchedReboot_wYzCCDVXlc",
+            },
+        )
 
-        resp = self.client.get(url, format="json")
-        serializer = PendingActionSerializer(pending_actions, many=True)
-
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(len(resp.data), 6)
-        self.assertEqual(resp.data, serializer.data)
-
-        self.check_not_authenticated("get", url)
-
-    @patch("logs.tasks.cancel_pending_action_task.delay")
-    def test_cancel_pending_action(self, mock_task):
-        url = "/logs/cancelpendingaction/"
-        pending_action = baker.make("logs.PendingAction")
-
-        serializer = PendingActionSerializer(pending_action).data
-        data = {"pk": pending_action.id}
-        resp = self.client.delete(url, data, format="json")
-        self.assertEqual(resp.status_code, 200)
-        mock_task.assert_called_with(serializer)
-
-        # try request again and it should fail since pending action doesn't exist
-        resp = self.client.delete(url, data, format="json")
-        self.assertEqual(resp.status_code, 404)
+        data = {"pk": action2.pk}  # type: ignore
+        nats_cmd.return_value = "error deleting sched task"
+        r = self.client.delete(url, data, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.data, "error deleting sched task")  # type: ignore
 
         self.check_not_authenticated("delete", url)
-
-
-class TestLogsTasks(TacticalTestCase):
-    def setUp(self):
-        self.authenticate()
-
-    @patch("agents.models.Agent.salt_api_cmd")
-    def test_cancel_pending_action_task(self, mock_salt_cmd):
-        from .tasks import cancel_pending_action_task
-
-        pending_action = baker.make(
-            "logs.PendingAction",
-            action_type="schedreboot",
-            status="pending",
-            details={"taskname": "test_name"},
-        )
-
-        # data that is passed to the task
-        data = PendingActionSerializer(pending_action).data
-
-        # set return value on mock to success
-        mock_salt_cmd.return_value = "success"
-        # call task with valid data and see if salt is called with correct data
-        ret = cancel_pending_action_task(data)
-        mock_salt_cmd.assert_called_with(
-            timeout=30, func="task.delete_task", arg=["name=test_name"]
-        )
-        # this should return successful
-        self.assertEquals(ret, "ok")
-
-        # this run should return false
-        mock_salt_cmd.reset_mock()
-        mock_salt_cmd.return_value = "timeout"
-        ret = cancel_pending_action_task(data)
-        self.assertEquals(ret, None)

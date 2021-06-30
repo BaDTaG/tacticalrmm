@@ -1,79 +1,137 @@
-import pytz
-import re
-import os
-import uuid
-import subprocess
 import datetime as dt
+import re
+import uuid
 
-from django.utils import timezone as djangotime
-from django.db import DataError
-from django.shortcuts import get_object_or_404
+import pytz
 from django.conf import settings
-from django.http import HttpResponse
-
+from django.shortcuts import get_object_or_404
+from django.utils import timezone as djangotime
+from loguru import logger
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework import status
 from rest_framework.views import APIView
-from rest_framework.permissions import AllowAny
 
-
-from rest_framework.decorators import api_view
-
-from .serializers import (
-    ClientSerializer,
-    SiteSerializer,
-    ClientTreeSerializer,
-    DeploymentSerializer,
-)
-from .models import Client, Site, Deployment
 from agents.models import Agent
 from core.models import CoreSettings
 from tacticalrmm.utils import notify_error
 
+from .models import Client, ClientCustomField, Deployment, Site, SiteCustomField
+from .permissions import ManageClientsPerms, ManageDeploymentPerms, ManageSitesPerms
+from .serializers import (
+    ClientCustomFieldSerializer,
+    ClientSerializer,
+    ClientTreeSerializer,
+    DeploymentSerializer,
+    SiteCustomFieldSerializer,
+    SiteSerializer,
+)
+
+logger.configure(**settings.LOG_CONFIG)
+
 
 class GetAddClients(APIView):
+    permission_classes = [IsAuthenticated, ManageClientsPerms]
+
     def get(self, request):
         clients = Client.objects.all()
         return Response(ClientSerializer(clients, many=True).data)
 
     def post(self, request):
+        # create client
+        client_serializer = ClientSerializer(data=request.data["client"])
+        client_serializer.is_valid(raise_exception=True)
+        client = client_serializer.save()
 
-        if "initialsetup" in request.data:
-            client = {"name": request.data["client"]["client"].strip()}
-            site = {"name": request.data["client"]["site"].strip()}
-            serializer = ClientSerializer(data=client, context=request.data["client"])
-            serializer.is_valid(raise_exception=True)
+        # create site
+        site_serializer = SiteSerializer(
+            data={"client": client.id, "name": request.data["site"]["name"]}
+        )
+
+        # make sure site serializer doesn't return errors and save
+        if site_serializer.is_valid():
+            site_serializer.save()
+        else:
+            # delete client since site serializer was invalid
+            client.delete()
+            site_serializer.is_valid(raise_exception=True)
+
+        if "initialsetup" in request.data.keys():
             core = CoreSettings.objects.first()
             core.default_time_zone = request.data["timezone"]
             core.save(update_fields=["default_time_zone"])
-        else:
-            client = {"name": request.data["client"].strip()}
-            site = {"name": request.data["site"].strip()}
-            serializer = ClientSerializer(data=client, context=request.data)
-            serializer.is_valid(raise_exception=True)
 
-        obj = serializer.save()
-        Site(client=obj, name=site["name"]).save()
+        # save custom fields
+        if "custom_fields" in request.data.keys():
+            for field in request.data["custom_fields"]:
 
-        return Response(f"{obj} was added!")
+                custom_field = field
+                custom_field["client"] = client.id
+
+                serializer = ClientCustomFieldSerializer(data=custom_field)
+                serializer.is_valid(raise_exception=True)
+                serializer.save()
+
+        return Response(f"{client} was added!")
 
 
-class GetUpdateDeleteClient(APIView):
+class GetUpdateClient(APIView):
+    permission_classes = [IsAuthenticated, ManageClientsPerms]
+
+    def get(self, request, pk):
+        client = get_object_or_404(Client, pk=pk)
+        return Response(ClientSerializer(client).data)
+
     def put(self, request, pk):
         client = get_object_or_404(Client, pk=pk)
-        serializer = ClientSerializer(data=request.data, instance=client)
+
+        serializer = ClientSerializer(
+            data=request.data["client"], instance=client, partial=True
+        )
         serializer.is_valid(raise_exception=True)
         serializer.save()
 
-        return Response("The Client was renamed")
+        # update custom fields
+        if "custom_fields" in request.data.keys():
+            for field in request.data["custom_fields"]:
 
-    def delete(self, request, pk):
+                custom_field = field
+                custom_field["client"] = pk
+
+                if ClientCustomField.objects.filter(field=field["field"], client=pk):
+                    value = ClientCustomField.objects.get(
+                        field=field["field"], client=pk
+                    )
+                    serializer = ClientCustomFieldSerializer(
+                        instance=value, data=custom_field
+                    )
+                    serializer.is_valid(raise_exception=True)
+                    serializer.save()
+                else:
+                    serializer = ClientCustomFieldSerializer(data=custom_field)
+                    serializer.is_valid(raise_exception=True)
+                    serializer.save()
+
+        return Response("The Client was updated")
+
+
+class DeleteClient(APIView):
+    permission_classes = [IsAuthenticated, ManageClientsPerms]
+
+    def delete(self, request, pk, sitepk):
+        from automation.tasks import generate_agent_checks_task
+
         client = get_object_or_404(Client, pk=pk)
-        agent_count = Agent.objects.filter(site__client=client).count()
-        if agent_count > 0:
+        agents = Agent.objects.filter(site__client=client)
+
+        if not sitepk:
             return notify_error(
-                f"Cannot delete {client} while {agent_count} agents exist in it. Move the agents to another client first."
+                "There needs to be a site specified to move existing agents to"
             )
+
+        site = get_object_or_404(Site, pk=sitepk)
+        agents.update(site=site)
+
+        generate_agent_checks_task.delay(all=True, create_tasks=True)
 
         client.delete()
         return Response(f"{client.name} was deleted!")
@@ -86,65 +144,126 @@ class GetClientTree(APIView):
 
 
 class GetAddSites(APIView):
+    permission_classes = [IsAuthenticated, ManageSitesPerms]
+
     def get(self, request):
         sites = Site.objects.all()
         return Response(SiteSerializer(sites, many=True).data)
 
     def post(self, request):
-        name = request.data["name"].strip()
+        serializer = SiteSerializer(data=request.data["site"])
+        serializer.is_valid(raise_exception=True)
+        site = serializer.save()
+
+        # save custom fields
+        if "custom_fields" in request.data.keys():
+
+            for field in request.data["custom_fields"]:
+
+                custom_field = field
+                custom_field["site"] = site.id
+
+                serializer = SiteCustomFieldSerializer(data=custom_field)
+                serializer.is_valid(raise_exception=True)
+                serializer.save()
+
+        return Response(f"Site {site.name} was added!")
+
+
+class GetUpdateSite(APIView):
+    permission_classes = [IsAuthenticated, ManageSitesPerms]
+
+    def get(self, request, pk):
+        site = get_object_or_404(Site, pk=pk)
+        return Response(SiteSerializer(site).data)
+
+    def put(self, request, pk):
+        site = get_object_or_404(Site, pk=pk)
+
+        if "client" in request.data["site"].keys() and (
+            site.client.id != request.data["site"]["client"]
+            and site.client.sites.count() == 1
+        ):
+            return notify_error("A client must have at least one site")
+
         serializer = SiteSerializer(
-            data={"name": name, "client": request.data["client"]},
-            context={"clientpk": request.data["client"]},
+            instance=site, data=request.data["site"], partial=True
         )
         serializer.is_valid(raise_exception=True)
         serializer.save()
 
-        return Response("ok")
+        # update custom field
+        if "custom_fields" in request.data.keys():
+
+            for field in request.data["custom_fields"]:
+
+                custom_field = field
+                custom_field["site"] = pk
+
+                if SiteCustomField.objects.filter(field=field["field"], site=pk):
+                    value = SiteCustomField.objects.get(field=field["field"], site=pk)
+                    serializer = SiteCustomFieldSerializer(
+                        instance=value, data=custom_field, partial=True
+                    )
+                    serializer.is_valid(raise_exception=True)
+                    serializer.save()
+                else:
+                    serializer = SiteCustomFieldSerializer(data=custom_field)
+                    serializer.is_valid(raise_exception=True)
+                    serializer.save()
+
+        return Response("Site was edited!")
 
 
-class GetUpdateDeleteSite(APIView):
-    def put(self, request, pk):
+class DeleteSite(APIView):
+    permission_classes = [IsAuthenticated, ManageSitesPerms]
 
-        site = get_object_or_404(Site, pk=pk)
-        serializer = SiteSerializer(instance=site, data=request.data)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
+    def delete(self, request, pk, sitepk):
+        from automation.tasks import generate_agent_checks_task
 
-        return Response("ok")
-
-    def delete(self, request, pk):
         site = get_object_or_404(Site, pk=pk)
         if site.client.sites.count() == 1:
-            return notify_error(f"A client must have at least 1 site.")
+            return notify_error("A client must have at least 1 site.")
 
-        agent_count = Agent.objects.filter(site=site).count()
+        agents = Agent.objects.filter(site=site)
 
-        if agent_count > 0:
+        if not sitepk:
             return notify_error(
-                f"Cannot delete {site.name} while {agent_count} agents exist in it. Move the agents to another site first."
+                "There needs to be a site specified to move the agents to"
             )
+
+        agent_site = get_object_or_404(Site, pk=sitepk)
+
+        agents.update(site=agent_site)
+
+        generate_agent_checks_task.delay(all=True, create_tasks=True)
 
         site.delete()
         return Response(f"{site.name} was deleted!")
 
 
 class AgentDeployment(APIView):
+    permission_classes = [IsAuthenticated, ManageDeploymentPerms]
+
     def get(self, request):
         deps = Deployment.objects.all()
         return Response(DeploymentSerializer(deps, many=True).data)
 
     def post(self, request):
         from knox.models import AuthToken
+        from accounts.models import User
 
         client = get_object_or_404(Client, pk=request.data["client"])
         site = get_object_or_404(Site, pk=request.data["site"])
+
+        installer_user = User.objects.filter(is_installer_user=True).first()
 
         expires = dt.datetime.strptime(
             request.data["expires"], "%Y-%m-%d %H:%M"
         ).astimezone(pytz.timezone("UTC"))
         now = djangotime.now()
         delta = expires - now
-        obj, token = AuthToken.objects.create(user=request.user, expiry=delta)
+        obj, token = AuthToken.objects.create(user=installer_user, expiry=delta)
 
         flags = {
             "power": request.data["power"],
@@ -180,6 +299,8 @@ class GenerateAgent(APIView):
     permission_classes = (AllowAny,)
 
     def get(self, request, uid):
+        from tacticalrmm.utils import generate_winagent_exe
+
         try:
             _ = uuid.UUID(uid, version=4)
         except ValueError:
@@ -187,99 +308,22 @@ class GenerateAgent(APIView):
 
         d = get_object_or_404(Deployment, uid=uid)
 
-        go_bin = "/usr/local/rmmgo/go/bin/go"
-
-        if not os.path.exists(go_bin):
-            return notify_error("Missing golang")
-
-        api = f"{request.scheme}://{request.get_host()}"
-        inno = (
-            f"winagent-v{settings.LATEST_AGENT_VER}.exe"
-            if d.arch == "64"
-            else f"winagent-v{settings.LATEST_AGENT_VER}-x86.exe"
-        )
-        download_url = settings.DL_64 if d.arch == "64" else settings.DL_32
-
         client = d.client.name.replace(" ", "").lower()
         site = d.site.name.replace(" ", "").lower()
         client = re.sub(r"([^a-zA-Z0-9]+)", "", client)
         site = re.sub(r"([^a-zA-Z0-9]+)", "", site)
-
         ext = ".exe" if d.arch == "64" else "-x86.exe"
-
         file_name = f"rmm-{client}-{site}-{d.mon_type}{ext}"
-        exe = os.path.join(settings.EXE_DIR, file_name)
 
-        if os.path.exists(exe):
-            try:
-                os.remove(exe)
-            except:
-                pass
-
-        goarch = "amd64" if d.arch == "64" else "386"
-        cmd = [
-            "env",
-            "GOOS=windows",
-            f"GOARCH={goarch}",
-            go_bin,
-            "build",
-            f"-ldflags=\"-X 'main.Inno={inno}'",
-            f"-X 'main.Api={api}'",
-            f"-X 'main.Client={d.client.pk}'",
-            f"-X 'main.Site={d.site.pk}'",
-            f"-X 'main.Atype={d.mon_type}'",
-            f"-X 'main.Rdp={d.install_flags['rdp']}'",
-            f"-X 'main.Ping={d.install_flags['ping']}'",
-            f"-X 'main.Power={d.install_flags['power']}'",
-            f"-X 'main.DownloadUrl={download_url}'",
-            f"-X 'main.Token={d.token_key}'\"",
-            "-o",
-            exe,
-        ]
-
-        gen = [
-            "env",
-            "GOOS=windows",
-            f"GOARCH={goarch}",
-            go_bin,
-            "generate",
-        ]
-        try:
-            r1 = subprocess.run(
-                " ".join(gen),
-                capture_output=True,
-                shell=True,
-                cwd=os.path.join(settings.BASE_DIR, "core/goinstaller"),
-            )
-        except:
-            return notify_error("genfailed")
-
-        if r1.returncode != 0:
-            return notify_error("genfailed")
-
-        try:
-            r = subprocess.run(
-                " ".join(cmd),
-                capture_output=True,
-                shell=True,
-                cwd=os.path.join(settings.BASE_DIR, "core/goinstaller"),
-            )
-        except:
-            return notify_error("buildfailed")
-
-        if r.returncode != 0:
-            return notify_error("buildfailed")
-
-        if settings.DEBUG:
-            with open(exe, "rb") as f:
-                response = HttpResponse(
-                    f.read(),
-                    content_type="application/vnd.microsoft.portable-executable",
-                )
-                response["Content-Disposition"] = f"inline; filename={file_name}"
-                return response
-        else:
-            response = HttpResponse()
-            response["Content-Disposition"] = f"attachment; filename={file_name}"
-            response["X-Accel-Redirect"] = f"/private/exe/{file_name}"
-            return response
+        return generate_winagent_exe(
+            client=d.client.pk,
+            site=d.site.pk,
+            agent_type=d.mon_type,
+            rdp=d.install_flags["rdp"],
+            ping=d.install_flags["ping"],
+            power=d.install_flags["power"],
+            arch=d.arch,
+            token=d.token_key,
+            api=f"https://{request.get_host()}",
+            file_name=file_name,
+        )

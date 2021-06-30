@@ -28,6 +28,10 @@ mesh_config="$(cat << EOF
     "_AgentPing": 60,
     "AgentPong": 300,
     "AllowHighQualityDesktop": true,
+    "agentCoreDump": false,
+    "Compression": true,
+    "WsCompression": true,
+    "AgentWsCompression": true,
     "MaxInvalidLogin": {
       "time": 5,
       "count": 5,
@@ -41,12 +45,7 @@ mesh_config="$(cat << EOF
       "NewAccounts": false,
       "mstsc": true,
       "GeoLocation": true,
-      "CertUrl": "https://${NGINX_HOST_IP}:443",
-      "httpheaders": {
-        "Strict-Transport-Security": "max-age=360000",
-        "_x-frame-options": "sameorigin",
-        "Content-Security-Policy": "default-src 'none'; script-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-src 'self'; media-src 'self'"
-      }
+      "CertUrl": "https://${NGINX_HOST_IP}:443"
     }
   }
 }

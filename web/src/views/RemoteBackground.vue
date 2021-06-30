@@ -48,8 +48,17 @@ import ProcessManager from "@/components/ProcessManager";
 import Services from "@/components/Services";
 import EventLog from "@/components/EventLog";
 
+import { createMetaMixin } from "quasar";
+
 export default {
   name: "RemoteBackground",
+  mixins: [
+    createMetaMixin(function () {
+      return {
+        title: this.title,
+      };
+    }),
+  ],
   components: {
     Services,
     EventLog,
@@ -66,31 +75,30 @@ export default {
   },
   methods: {
     genURLS() {
-      this.$axios.get(`/agents/${this.pk}/meshcentral/`).then(r => {
-        this.terminal = r.data.terminal;
-        this.file = r.data.file;
-        this.title = `${r.data.hostname} - ${r.data.client} - ${r.data.site} | Remote Background`;
-      });
+      this.$axios
+        .get(`/agents/${this.pk}/meshcentral/`)
+        .then(r => {
+          this.terminal = r.data.terminal;
+          this.file = r.data.file;
+          this.title = `${r.data.hostname} - ${r.data.client} - ${r.data.site} | Remote Background`;
+        })
+        .catch(e => {});
     },
-    getDark() {
+    getUI() {
       this.$store.dispatch("getDashInfo").then(r => {
         this.darkMode = r.data.dark_mode;
         this.$q.dark.set(this.darkMode);
+        this.$q.loadingBar.setDefaults({ color: r.data.loading_bar_color });
       });
     },
-  },
-  meta() {
-    return {
-      title: this.title,
-    };
   },
   computed: {
     pk() {
       return this.$route.params.pk;
     },
   },
-  created() {
-    this.getDark();
+  mounted() {
+    this.getUI();
     this.genURLS();
   },
 };

@@ -10,7 +10,7 @@
           <q-form @submit.prevent="finish">
             <q-card-section>
               <div>Add Client:</div>
-              <q-input dense outlined v-model="client.client" :rules="[val => !!val || '*Required']">
+              <q-input dense outlined v-model="client.name" :rules="[val => !!val || '*Required']">
                 <template v-slot:prepend>
                   <q-icon name="business" />
                 </template>
@@ -18,7 +18,7 @@
             </q-card-section>
             <q-card-section>
               <div>Add Site:</div>
-              <q-input dense outlined v-model="client.site" :rules="[val => !!val || '*Required']">
+              <q-input dense outlined v-model="site.name" :rules="[val => !!val || '*Required']">
                 <template v-slot:prepend>
                   <q-icon name="apartment" />
                 </template>
@@ -37,6 +37,7 @@
                   stack-label
                   filled
                   counter
+                  class="full-width"
                   accept=".exe"
                 >
                   <template v-slot:prepend>
@@ -57,7 +58,6 @@
 </template>
 
 <script>
-import axios from "axios";
 import mixins from "@/mixins/mixins";
 
 export default {
@@ -66,8 +66,10 @@ export default {
   data() {
     return {
       client: {
-        client: null,
-        site: null,
+        name: "",
+      },
+      site: {
+        name: "",
       },
       meshagent: null,
       allTimezones: [],
@@ -80,43 +82,37 @@ export default {
       this.$q.loading.show();
       const data = {
         client: this.client,
+        site: this.site,
         timezone: this.timezone,
         initialsetup: true,
       };
-      axios
+      this.$axios
         .post("/clients/clients/", data)
         .then(r => {
           let formData = new FormData();
           formData.append("arch", this.arch);
           formData.append("meshagent", this.meshagent);
-          axios
+          this.$axios
             .put("/core/uploadmesh/", formData)
             .then(() => {
               this.$q.loading.hide();
               this.$router.push({ name: "Dashboard" });
             })
-            .catch(e => {
-              this.$q.loading.hide();
-              this.notifyError("error uploading");
-            });
+            .catch(e => this.$q.loading.hide());
         })
-        .catch(e => {
-          this.$q.loading.hide();
-          if (e.response.data.name) {
-            this.notifyError(e.response.data.name);
-          } else {
-            this.notifyError(e.response.data.non_field_errors);
-          }
-        });
+        .catch(e => this.$q.loading.hide());
     },
     getSettings() {
-      axios.get("/core/getcoresettings/").then(r => {
-        this.allTimezones = Object.freeze(r.data.all_timezones);
-        this.timezone = r.data.default_time_zone;
-      });
+      this.$axios
+        .get("/core/getcoresettings/")
+        .then(r => {
+          this.allTimezones = Object.freeze(r.data.all_timezones);
+          this.timezone = r.data.default_time_zone;
+        })
+        .catch(e => {});
     },
   },
-  created() {
+  mounted() {
     this.getSettings();
   },
 };

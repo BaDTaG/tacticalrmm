@@ -1,17 +1,15 @@
-from django.contrib import admin
-from django.urls import path, include
 from django.conf import settings
+from django.urls import include, path
 from knox import views as knox_views
-from accounts.views import LoginView, CheckCreds
+
+from accounts.views import CheckCreds, LoginView
+from core.consumers import DashInfo
 
 urlpatterns = [
-    path(settings.ADMIN_URL, admin.site.urls),
     path("checkcreds/", CheckCreds.as_view()),
     path("login/", LoginView.as_view()),
     path("logout/", knox_views.LogoutView.as_view()),
     path("logoutall/", knox_views.LogoutAllView.as_view()),
-    path("api/v1/", include("api.urls")),
-    path("api/v2/", include("apiv2.urls")),
     path("api/v3/", include("apiv3.urls")),
     path("clients/", include("clients.urls")),
     path("agents/", include("agents.urls")),
@@ -26,4 +24,13 @@ urlpatterns = [
     path("scripts/", include("scripts.urls")),
     path("alerts/", include("alerts.urls")),
     path("accounts/", include("accounts.urls")),
+]
+
+if hasattr(settings, "ADMIN_ENABLED") and settings.ADMIN_ENABLED:
+    from django.contrib import admin
+
+    urlpatterns += (path(settings.ADMIN_URL, admin.site.urls),)
+
+ws_urlpatterns = [
+    path("ws/dashinfo/", DashInfo.as_asgi()),  # type: ignore
 ]

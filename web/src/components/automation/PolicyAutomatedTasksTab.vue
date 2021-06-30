@@ -2,209 +2,325 @@
   <div class="row">
     <div class="col-12">
       <q-btn
-        v-if="selectedPolicy !== null"
+        v-if="!!selectedPolicy"
         size="sm"
         color="grey-5"
         icon="fas fa-plus"
         label="Add Task"
         text-color="black"
-        ref="add"
-        @click="showAddAutomatedTask = true"
+        @click="showAddTask = true"
       />
-      <q-btn
-        v-if="selectedPolicy !== null"
+      <q-btn v-if="!!selectedPolicy" dense flat push @click="getTasks" icon="refresh" />
+      <q-table
+        :table-class="{ 'table-bgcolor': !$q.dark.isActive, 'table-bgcolor-dark': $q.dark.isActive }"
+        class="tabs-tbl-sticky"
+        :rows="tasks"
+        :columns="columns"
+        :rows-per-page-options="[0]"
+        v-model:pagination="pagination"
         dense
-        flat
-        push
-        @click="refreshTasks(selectedPolicy)"
-        icon="refresh"
-        ref="refresh"
-      />
-      <template>
-        <q-table
-          dense
-          :table-class="{ 'table-bgcolor': !$q.dark.isActive, 'table-bgcolor-dark': $q.dark.isActive }"
-          class="tabs-tbl-sticky"
-          style="max-height: 35vh"
-          :data="tasks"
-          :columns="columns"
-          row-key="id"
-          binary-state-sort
-          :pagination.sync="pagination"
-          hide-pagination
-        >
-          <!-- header slots -->
-          <template v-slot:header-cell-enabled="props">
-            <q-th auto-width :props="props">
-              <small>Enabled</small>
-            </q-th>
-          </template>
-          <!-- No data Slot -->
-          <template v-slot:no-data>
-            <div class="full-width row flex-center q-gutter-sm">
-              <span v-if="selectedPolicy === null">Click on a policy to see the tasks</span>
-              <span v-else>There are no tasks added to this policy</span>
-            </div>
-          </template>
-          <!-- body slots -->
-          <template v-slot:body="props" :props="props">
-            <q-tr @contextmenu="editTaskPk = props.row.id">
-              <!-- context menu -->
-              <q-menu context-menu>
-                <q-list dense style="min-width: 200px">
-                  <q-item
-                    clickable
-                    v-close-popup
-                    @click="runTask(props.row.id, props.row.enabled)"
-                    id="context-runtask"
-                  >
-                    <q-item-section side>
-                      <q-icon name="play_arrow" />
-                    </q-item-section>
-                    <q-item-section>Run task now</q-item-section>
-                  </q-item>
-                  <q-item
-                    clickable
-                    v-close-popup
-                    @click="showEditAutomatedTask = true"
-                    id="context-edit"
-                    v-show="false"
-                  >
-                    <q-item-section side>
-                      <q-icon name="edit" />
-                    </q-item-section>
-                    <q-item-section>Edit</q-item-section>
-                  </q-item>
-                  <q-item clickable v-close-popup @click="deleteTask(props.row.name, props.row.id)" id="context-delete">
-                    <q-item-section side>
-                      <q-icon name="delete" />
-                    </q-item-section>
-                    <q-item-section>Delete</q-item-section>
-                  </q-item>
-                  <q-separator />
-                  <q-item clickable v-close-popup @click="showStatus(props.row)" id="context-status">
-                    <q-item-section side>
-                      <q-icon name="sync" />
-                    </q-item-section>
-                    <q-item-section>Policy Status</q-item-section>
-                  </q-item>
-                  <q-separator />
-                  <q-item clickable v-close-popup>
-                    <q-item-section>Close</q-item-section>
-                  </q-item>
-                </q-list>
-              </q-menu>
-              <!-- tds -->
-              <q-td>
-                <q-checkbox
-                  dense
-                  @input="taskEnableorDisable(props.row.id, props.row.enabled)"
-                  v-model="props.row.enabled"
-                />
-              </q-td>
-              <q-td>{{ props.row.name }}</q-td>
-              <q-td>{{ props.row.schedule }}</q-td>
-              <q-td>
-                <span
-                  style="cursor: pointer; text-decoration: underline"
-                  @click="showStatus(props.row)"
-                  class="status-cell text-primary"
-                  >See Status</span
-                >
-              </q-td>
-              <q-td v-if="props.row.assigned_check">{{ props.row.assigned_check.readable_desc }}</q-td>
-              <q-td v-else></q-td>
-            </q-tr>
-          </template>
-        </q-table>
-      </template>
+        row-key="id"
+        binary-state-sort
+        hide-pagination
+        virtual-scroll
+      >
+        <!-- No data Slot -->
+        <template v-slot:no-data>
+          <div class="full-width row flex-center q-gutter-sm">
+            <span v-if="!selectedPolicy">Click on a policy to see the tasks</span>
+            <span v-else>There are no tasks added to this policy</span>
+          </div>
+        </template>
+        <!-- header slots -->
+        <template v-slot:header-cell-enabled="props">
+          <q-th auto-width :props="props">
+            <small>Enabled</small>
+          </q-th>
+        </template>
+
+        <template v-slot:header-cell-smsalert="props">
+          <q-th auto-width :props="props">
+            <q-icon name="phone_android" size="1.5em">
+              <q-tooltip>SMS Alert</q-tooltip>
+            </q-icon>
+          </q-th>
+        </template>
+
+        <template v-slot:header-cell-emailalert="props">
+          <q-th auto-width :props="props">
+            <q-icon name="email" size="1.5em">
+              <q-tooltip>Email Alert</q-tooltip>
+            </q-icon>
+          </q-th>
+        </template>
+        <template v-slot:header-cell-dashboardalert="props">
+          <q-th auto-width :props="props">
+            <q-icon name="notifications" size="1.5em">
+              <q-tooltip>Dashboard Alert</q-tooltip>
+            </q-icon>
+          </q-th>
+        </template>
+
+        <template v-slot:header-cell-collector="props">
+          <q-th auto-width :props="props">
+            <q-icon name="mdi-database-arrow-up" size="1.5em">
+              <q-tooltip>Collector Task</q-tooltip>
+            </q-icon>
+          </q-th>
+        </template>
+
+        <!-- body slots -->
+        <template v-slot:body="props" :props="props">
+          <q-tr class="cursor-pointer" @dblclick="showEditTask(props.row)">
+            <!-- context menu -->
+            <q-menu context-menu>
+              <q-list dense style="min-width: 200px">
+                <q-item clickable v-close-popup @click="runTask(props.row.id, props.row.enabled)">
+                  <q-item-section side>
+                    <q-icon name="play_arrow" />
+                  </q-item-section>
+                  <q-item-section>Run task now</q-item-section>
+                </q-item>
+                <q-item clickable v-close-popup @click="showEditTask(props.row)">
+                  <q-item-section side>
+                    <q-icon name="edit" />
+                  </q-item-section>
+                  <q-item-section>Edit</q-item-section>
+                </q-item>
+                <q-item clickable v-close-popup @click="deleteTask(props.row.name, props.row.id)">
+                  <q-item-section side>
+                    <q-icon name="delete" />
+                  </q-item-section>
+                  <q-item-section>Delete</q-item-section>
+                </q-item>
+                <q-separator />
+                <q-item clickable v-close-popup @click="showStatus(props.row)">
+                  <q-item-section side>
+                    <q-icon name="sync" />
+                  </q-item-section>
+                  <q-item-section>Policy Status</q-item-section>
+                </q-item>
+                <q-separator />
+                <q-item clickable v-close-popup>
+                  <q-item-section>Close</q-item-section>
+                </q-item>
+              </q-list>
+            </q-menu>
+            <!-- tds -->
+            <q-td>
+              <q-checkbox
+                dense
+                @update:model-value="taskEnableorDisable(props.row.id, props.row.enabled)"
+                v-model="props.row.enabled"
+              />
+            </q-td>
+
+            <q-td>
+              <q-checkbox
+                dense
+                @update:model-value="taskAlert(props.row.id, 'Text', props.row.text_alert)"
+                v-model="props.row.text_alert"
+              />
+            </q-td>
+            <!-- email alert -->
+            <q-td>
+              <q-checkbox
+                dense
+                @update:model-value="taskAlert(props.row.id, 'Email', props.row.email_alert)"
+                v-model="props.row.email_alert"
+              />
+            </q-td>
+            <!-- dashboard alert -->
+            <q-td>
+              <q-checkbox
+                dense
+                @update:model-value="taskAlert(props.row.id, 'Dashboard', props.row.dashboard_alert)"
+                v-model="props.row.dashboard_alert"
+              />
+            </q-td>
+            <!-- is collector task -->
+            <q-td>
+              <q-icon v-if="!!props.row.custom_field" style="font-size: 1.3rem" name="check">
+                <q-tooltip>The task updates a custom field on the agent</q-tooltip>
+              </q-icon>
+            </q-td>
+            <q-td>{{ props.row.name }}</q-td>
+            <q-td>{{ props.row.schedule }}</q-td>
+            <q-td>
+              <span
+                style="cursor: pointer; text-decoration: underline"
+                @click="showStatus(props.row)"
+                class="status-cell text-primary"
+                >See Status</span
+              >
+            </q-td>
+            <q-td v-if="props.row.assigned_check">{{ props.row.assigned_check.readable_desc }}</q-td>
+            <q-td v-else></q-td>
+          </q-tr>
+        </template>
+      </q-table>
     </div>
     <!-- modals -->
-    <q-dialog v-model="showAddAutomatedTask" position="top">
-      <AddAutomatedTask :policypk="selectedPolicy" @close="showAddAutomatedTask = false" />
-    </q-dialog>
-
-    <!-- policy task status -->
-    <q-dialog v-model="showPolicyTaskStatus">
-      <PolicyStatus type="task" :item="statusTask" :description="`${statusTask.name} Agent Status`" />
+    <q-dialog v-model="showAddTask" position="top">
+      <AddAutomatedTask
+        :policypk="selectedPolicy"
+        @close="
+          getTasks();
+          showAddTask = false;
+        "
+      />
     </q-dialog>
   </div>
 </template>
 
 <script>
-import { mapGetters } from "vuex";
-import mixins, { notifySuccessConfig, notifyErrorConfig } from "@/mixins/mixins";
+import mixins from "@/mixins/mixins";
 import AddAutomatedTask from "@/components/modals/tasks/AddAutomatedTask";
+import EditAutomatedTask from "@/components/modals/tasks/EditAutomatedTask";
 import PolicyStatus from "@/components/automation/modals/PolicyStatus";
 
 export default {
   name: "PolicyAutomatedTasksTab",
-  components: {
-    AddAutomatedTask,
-    PolicyStatus,
-  },
   mixins: [mixins],
+  components: { AddAutomatedTask },
+  props: {
+    selectedPolicy: !Number,
+  },
   data() {
     return {
-      showAddAutomatedTask: false,
-      showEditAutomatedTask: false,
-      showPolicyTaskStatus: false,
-      statusTask: {},
-      editTaskPk: null,
+      tasks: [],
+      showAddTask: false,
       columns: [
         { name: "enabled", align: "left", field: "enabled" },
-        { name: "name", label: "Name", field: "name", align: "left" },
+        { name: "smsalert", field: "text_alert", align: "left" },
+        { name: "emailalert", field: "email_alert", align: "left" },
+        { name: "dashboardalert", field: "dashboard_alert", align: "left" },
+        { name: "collector", label: "Collector", field: "custom_field", align: "left", sortable: true },
+        { name: "name", label: "Name", field: "name", align: "left", sortable: true },
         {
           name: "schedule",
           label: "Schedule",
           field: "schedule",
           align: "left",
+          sortable: true,
         },
         {
           name: "status",
           label: "More Info",
           field: "more_info",
           align: "left",
+          sortable: true,
         },
         {
           name: "assignedcheck",
           label: "Assigned Check",
           field: "assigned_check",
           align: "left",
+          sortable: true,
         },
       ],
       pagination: {
-        rowsPerPage: 9999,
+        rowsPerPage: 0,
+        sortBy: "name",
+        descending: true,
       },
     };
   },
+  watch: {
+    selectedPolicy: function (newValue, oldValue) {
+      if (newValue !== oldValue) this.getTasks();
+    },
+  },
   methods: {
-    taskEnableorDisable(pk, action) {
-      const data = { id: pk, enableordisable: action };
-      this.$store
-        .dispatch("editAutoTask", data)
+    getTasks() {
+      this.$q.loading.show();
+      this.$axios
+        .get(`/automation/${this.selectedPolicy}/policyautomatedtasks/`)
         .then(r => {
-          this.$store.dispatch("automation/loadPolicyAutomatedTasks", this.selectedPolicy);
-          this.$q.notify(notifySuccessConfig(r.data));
+          this.tasks = r.data;
+          this.$q.loading.hide();
         })
-        .catch(e => this.$q.notify(notifySuccessConfig("Something went wrong")));
+        .catch(e => {
+          this.$q.loading.hide();
+        });
+    },
+    taskEnableorDisable(pk, action) {
+      this.$q.loading.show();
+      const data = { id: pk, enableordisable: !action };
+      this.$axios
+        .patch(`/tasks/${pk}/automatedtasks/`, data)
+        .then(r => {
+          this.getTasks();
+          this.$q.loading.hide();
+          this.notifySuccess("Task has edited successfully");
+        })
+        .catch(e => {
+          this.$q.loading.hide();
+        });
+    },
+    taskAlert(pk, alert_type, action) {
+      this.$q.loading.show();
+
+      const data = {
+        id: pk,
+      };
+
+      if (alert_type === "Email") {
+        data.email_alert = !action;
+      } else if (alert_type === "Text") {
+        data.text_alert = !action;
+      } else {
+        data.dashboard_alert = !action;
+      }
+
+      const act = !action ? "enabled" : "disabled";
+      this.$axios
+        .put(`/tasks/${pk}/automatedtasks/`, data)
+        .then(r => {
+          this.$q.loading.hide();
+          this.notifySuccess(`${alert_type} alerts ${act}`);
+        })
+        .catch(e => {
+          this.$q.loading.hide();
+        });
+    },
+    showEditTask(task) {
+      this.$q
+        .dialog({
+          component: EditAutomatedTask,
+          componentProps: {
+            task: task,
+          },
+        })
+        .onOk(() => {
+          this.getTasks();
+        });
     },
     showStatus(task) {
-      this.statusTask = task;
-      this.showPolicyTaskStatus = true;
-    },
-    refreshTasks(id) {
-      this.$store.dispatch("automation/loadPolicyAutomatedTasks", id);
+      this.$q.dialog({
+        component: PolicyStatus,
+        componentProps: {
+          type: "task",
+          item: task,
+        },
+      });
     },
     runTask(pk, enabled) {
       if (!enabled) {
-        this.$q.notify(notifyErrorConfig("Task cannot be run when it's disabled. Enable it first."));
+        this.notifyError("Task cannot be run when it's disabled. Enable it first.");
         return;
       }
-      this.$store
-        .dispatch("automation/runPolicyTask", pk)
-        .then(r => this.$q.notify(notifySuccessConfig(r.data)))
-        .catch(() => this.$q.notify(notifyErrorConfig("Something went wrong")));
+
+      this.$q.loading.show();
+      this.$axios
+        .put(`/automation/runwintask/${pk}/`)
+        .then(r => {
+          this.$q.loading.hide();
+          this.notifySuccess("The task was initated on all affected agents");
+        })
+        .catch(e => {
+          this.$q.loading.hide();
+        });
     },
     deleteTask(name, pk) {
       this.$q
@@ -215,21 +331,22 @@ export default {
           persistent: true,
         })
         .onOk(() => {
-          this.$store
-            .dispatch("deleteAutoTask", pk)
+          this.$q.loading.show();
+          this.$axios
+            .delete(`/tasks/${pk}/automatedtasks/`)
             .then(r => {
-              this.$store.dispatch("automation/loadPolicyAutomatedTasks", this.selectedPolicy);
-              this.$q.notify(notifySuccessConfig(r.data));
+              this.getTasks();
+              this.$q.loading.hide();
+              this.notifySuccess("Task was deleted successfully");
             })
-            .catch(e => this.$q.notify(notifyErrorConfig("Something went wrong")));
+            .catch(e => {
+              this.$q.loading.hide();
+            });
         });
     },
   },
-  computed: {
-    ...mapGetters({
-      tasks: "automation/tasks",
-      selectedPolicy: "automation/selectedPolicyPk",
-    }),
+  created() {
+    this.getTasks();
   },
 };
 </script>

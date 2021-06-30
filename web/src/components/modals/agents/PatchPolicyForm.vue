@@ -93,7 +93,7 @@
       <div class="col-3">Day of month to run:</div>
       <div class="col-4"></div>
       <q-select
-        :disabled="winupdatepolicy.run_time_frequency === 'inherit'"
+        v-show="winupdatepolicy.run_time_frequency !== 'inherit'"
         dense
         class="col-5"
         outlined
@@ -103,11 +103,10 @@
         map-options
       />
     </q-card-section>
-    <q-card-section class="row">
+    <q-card-section class="row" v-show="winupdatepolicy.run_time_frequency !== 'inherit'">
       <div class="col-3">Scheduled Time:</div>
       <div class="col-4"></div>
       <q-select
-        :disabled="winupdatepolicy.run_time_frequency === 'inherit'"
         dense
         class="col-5"
         outlined
@@ -118,51 +117,17 @@
       />
     </q-card-section>
     <q-card-section
-      v-if="winupdatepolicy.run_time_frequency === 'daily' || winupdatepolicy.run_time_frequency === 'inherit'"
+      v-if="winupdatepolicy.run_time_frequency === 'daily'"
+      v-show="winupdatepolicy.run_time_frequency !== 'inherit'"
     >
       <div class="q-gutter-sm">
-        <q-checkbox
-          :disabled="winupdatepolicy.run_time_frequency === 'inherit'"
-          v-model="winupdatepolicy.run_time_days"
-          :val="1"
-          label="Monday"
-        />
-        <q-checkbox
-          :disabled="winupdatepolicy.run_time_frequency === 'inherit'"
-          v-model="winupdatepolicy.run_time_days"
-          :val="2"
-          label="Tuesday"
-        />
-        <q-checkbox
-          :disabled="winupdatepolicy.run_time_frequency === 'inherit'"
-          v-model="winupdatepolicy.run_time_days"
-          :val="3"
-          label="Wednesday"
-        />
-        <q-checkbox
-          :disabled="winupdatepolicy.run_time_frequency === 'inherit'"
-          v-model="winupdatepolicy.run_time_days"
-          :val="4"
-          label="Thursday"
-        />
-        <q-checkbox
-          :disabled="winupdatepolicy.run_time_frequency === 'inherit'"
-          v-model="winupdatepolicy.run_time_days"
-          :val="5"
-          label="Friday"
-        />
-        <q-checkbox
-          :disabled="winupdatepolicy.run_time_frequency === 'inherit'"
-          v-model="winupdatepolicy.run_time_days"
-          :val="6"
-          label="Saturday"
-        />
-        <q-checkbox
-          :disabled="winupdatepolicy.run_time_frequency === 'inherit'"
-          v-model="winupdatepolicy.run_time_days"
-          :val="0"
-          label="Sunday"
-        />
+        <q-checkbox v-model="winupdatepolicy.run_time_days" :val="1" label="Monday" />
+        <q-checkbox v-model="winupdatepolicy.run_time_days" :val="2" label="Tuesday" />
+        <q-checkbox v-model="winupdatepolicy.run_time_days" :val="3" label="Wednesday" />
+        <q-checkbox v-model="winupdatepolicy.run_time_days" :val="4" label="Thursday" />
+        <q-checkbox v-model="winupdatepolicy.run_time_days" :val="5" label="Friday" />
+        <q-checkbox v-model="winupdatepolicy.run_time_days" :val="6" label="Saturday" />
+        <q-checkbox v-model="winupdatepolicy.run_time_days" :val="0" label="Sunday" />
       </div>
     </q-card-section>
     <!-- Reboot After Installation -->
@@ -186,57 +151,48 @@
     <hr />
     <q-card-section class="row" v-if="!policy">
       <div class="col-5">
-        <q-checkbox
-          v-model="winupdatepolicy.reprocess_failed_inherit"
-          label="Inherit failed patch settings"
-        />
+        <q-checkbox v-model="winupdatepolicy.reprocess_failed_inherit" label="Inherit failed patch settings" />
       </div>
     </q-card-section>
-    <q-card-section class="row">
+    <q-card-section class="row" v-show="!winupdatepolicy.reprocess_failed_inherit">
       <div class="col-5">
-        <q-checkbox
-          :disabled="winupdatepolicy.reprocess_failed_inherit"
-          v-model="winupdatepolicy.reprocess_failed"
-          label="Reprocess failed patches"
-        />
+        <q-checkbox v-model="winupdatepolicy.reprocess_failed" label="Reprocess failed patches" />
       </div>
 
       <div class="col-3">
         <q-input
           dense
           v-model.number="winupdatepolicy.reprocess_failed_times"
-          :disabled="winupdatepolicy.reprocess_failed_inherit"
           type="number"
           filled
           label="Times"
-          :rules="[ val => val > 0 || 'Must be greater than 0']"
+          :rules="[val => val > 0 || 'Must be greater than 0']"
         />
       </div>
       <div class="col-3"></div>
-      <q-checkbox
-        v-model="winupdatepolicy.email_if_fail"
-        :disabled="winupdatepolicy.reprocess_failed_inherit"
-        label="Send an email when patch installation fails"
-      />
+      <q-checkbox v-model="winupdatepolicy.email_if_fail" label="Send an email when patch installation fails" />
     </q-card-section>
     <q-card-actions align="left" v-if="policy">
-      <q-btn label="Apply" color="primary" @click="submit" />
+      <q-btn label="Submit" color="primary" @click="submit" />
+      <q-btn label="Cancel" @click="$emit('hide')" />
       <q-space />
-      <q-btn v-if="editing" label="Remove Policy" color="negative" @click="deletePolicy" />
+      <q-btn v-if="editing" label="Remove Policy" color="negative" @click="deletePolicy(winupdatepolicy)" />
     </q-card-actions>
   </div>
 </template>
 
 <script>
 import { scheduledTimes, monthDays } from "@/mixins/data";
-import { notifySuccessConfig, notifyErrorConfig } from "@/mixins/mixins";
+import mixins from "@/mixins/mixins";
 
 export default {
   name: "PatchPolicyForm",
+  emits: ["close", "hide"],
   props: {
     policy: Object,
     agent: Object,
   },
+  mixins: [mixins],
   data() {
     return {
       editing: true,
@@ -250,6 +206,7 @@ export default {
         run_time_hour: 3,
         run_time_frequency: "daily",
         run_time_days: [],
+        run_time_day: 1,
         reboot_after_install: "never",
         reprocess_failed_inherit: false,
         reprocess_failed: false,
@@ -282,34 +239,32 @@ export default {
       if (this.policy) {
         // editing patch policy
         if (this.editing) {
-          this.$store
-            .dispatch("automation/editPatchPolicy", this.winupdatepolicy)
+          this.$axios
+            .put(`/automation/winupdatepolicy/${this.winupdatepolicy.id}/`, this.winupdatepolicy)
             .then(response => {
               this.$q.loading.hide();
               this.$emit("close");
-              this.$q.notify(notifySuccessConfig("Patch policy was edited successfully!"));
+              this.notifySuccess("Patch policy was edited successfully!");
             })
             .catch(error => {
               this.$q.loading.hide();
-              this.$q.notify(notifyErrorConfig("An Error occured while editing patch policy"));
             });
         } else {
           // adding patch policy
-          this.$store
-            .dispatch("automation/addPatchPolicy", this.winupdatepolicy)
+          this.$axios
+            .post("/automation/winupdatepolicy/", this.winupdatepolicy)
             .then(response => {
               this.$q.loading.hide();
               this.$emit("close");
-              this.$q.notify(notifySuccessConfig("Patch policy was created successfully!"));
+              this.notifySuccess("Patch policy was created successfully!");
             })
             .catch(error => {
               this.$q.loading.hide();
-              this.$q.notify(notifyErrorConfig("An Error occured while adding patch policy"));
             });
         }
       }
     },
-    deletePolicy() {
+    deletePolicy(policy) {
       this.$q
         .dialog({
           title: "Delete patch policy?",
@@ -318,30 +273,27 @@ export default {
         })
         .onOk(() => {
           this.$q.loading.show();
-          this.$store
-            .dispatch("automation/deletePatchPolicy", this.winupdatepolicy.id)
-            .then(response => {
+          this.$axios
+            .delete(`/automation/winupdatepolicy/${policy.id}/`)
+            .then(r => {
               this.$q.loading.hide();
               this.$emit("close");
-              this.$q.notify(notifySuccessConfig("Patch policy was cleared successfully!"));
+              this.notifySuccess("Patch policy was deleted successfully!");
             })
             .catch(error => {
               this.$q.loading.hide();
-              this.$q.notify(notifyErrorConfig("An Error occured while clearing the patch policy"));
             });
         });
     },
   },
   mounted() {
-    if (this.policy) {
-      if (this.policy.winupdatepolicy.length === 1) {
-        this.winupdatepolicy = this.policy.winupdatepolicy[0];
-        this.editing = true;
-      } else {
-        this.winupdatepolicy = this.defaultWinUpdatePolicy;
-        this.winupdatepolicy.policy = this.policy.id;
-        this.editing = false;
-      }
+    if (this.policy && this.policy.winupdatepolicy[0]) {
+      this.winupdatepolicy = this.policy.winupdatepolicy[0];
+      this.editing = true;
+    } else if (this.policy) {
+      this.winupdatepolicy = this.defaultWinUpdatePolicy;
+      this.winupdatepolicy.policy = this.policy.id;
+      this.editing = false;
     } else if (this.agent) {
       this.winupdatepolicy = this.agent.winupdatepolicy[0];
 

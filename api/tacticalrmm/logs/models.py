@@ -1,13 +1,15 @@
 import datetime as dt
-import json
 from abc import abstractmethod
+
 from django.db import models
-from tacticalrmm.middleware import get_username, get_debug_info
+
+from tacticalrmm.middleware import get_debug_info, get_username
 
 ACTION_TYPE_CHOICES = [
     ("schedreboot", "Scheduled Reboot"),
-    ("taskaction", "Scheduled Task Action"),
+    ("taskaction", "Scheduled Task Action"),  # deprecated
     ("agentupdate", "Agent Update"),
+    ("chocoinstall", "Chocolatey Software Install"),
 ]
 
 AUDIT_ACTION_TYPE_CHOICES = [
@@ -39,13 +41,6 @@ AUDIT_OBJECT_TYPE_CHOICES = [
     ("coresettings", "Core Settings"),
     ("bulk", "Bulk"),
 ]
-
-# taskaction details format
-# {
-#   "action": "taskcreate" | "taskdelete" | "tasktoggle",
-#   "value": "Enable" | "Disable" # only needed for task toggle,
-#   "task_id": 1
-# }
 
 STATUS_CHOICES = [
     ("pending", "Pending"),
@@ -179,8 +174,8 @@ class AuditLog(models.Model):
 
     @staticmethod
     def audit_bulk_action(username, action, affected, debug_info={}):
-        from clients.models import Client, Site
         from agents.models import Agent
+        from clients.models import Client, Site
         from scripts.models import Script
 
         target = ""
@@ -248,9 +243,10 @@ class PendingAction(models.Model):
         if self.action_type == "schedreboot":
             obj = dt.datetime.strptime(self.details["time"], "%Y-%m-%d %H:%M:%S")
             return dt.datetime.strftime(obj, "%B %d, %Y at %I:%M %p")
-
-        elif self.action_type == "taskaction" or self.action_type == "agentupdate":
-            return "Next agent check-in"
+        elif self.action_type == "agentupdate":
+            return "Next update cycle"
+        elif self.action_type == "chocoinstall":
+            return "ASAP"
 
     @property
     def description(self):
@@ -260,19 +256,8 @@ class PendingAction(models.Model):
         elif self.action_type == "agentupdate":
             return f"Agent update to {self.details['version']}"
 
-        elif self.action_type == "taskaction":
-            if self.details["action"] == "taskdelete":
-                return "Device pending task deletion"
-            elif self.details["action"] == "taskcreate":
-                return "Device pending task creation"
-            elif self.details["action"] == "tasktoggle":
-                # value is bool
-                if self.details["value"]:
-                    action = "enable"
-                else:
-                    action = "disable"
-
-                return f"Device pending task {action}"
+        elif self.action_type == "chocoinstall":
+            return f"{self.details['name']} software install"
 
 
 class BaseAuditModel(models.Model):

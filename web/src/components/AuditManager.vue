@@ -5,13 +5,13 @@
       <q-space />Audit Manager
       <q-space />
       <q-btn dense flat icon="close" v-close-popup>
-        <q-tooltip content-class="bg-white text-primary">Close</q-tooltip>
+        <q-tooltip class="bg-white text-primary">Close</q-tooltip>
       </q-btn>
     </q-bar>
     <div class="text-h6 q-pl-sm q-pt-sm">Filter</div>
     <div class="row">
       <div class="q-pa-sm col-1">
-        <q-option-group v-model="filterType" :options="filterTypeOptions" color="primary" @input="clear" />
+        <q-option-group v-model="filterType" :options="filterTypeOptions" color="primary" @update:model-value="clear" />
       </div>
       <div class="q-pa-sm col-2" v-if="filterType === 'agents'">
         <q-select
@@ -34,6 +34,16 @@
             <q-item>
               <q-item-section class="text-grey">No results</q-item-section>
             </q-item>
+          </template>
+          <template v-slot:option="scope">
+            <q-item v-if="!scope.opt.category" v-bind="scope.itemProps" class="q-pl-lg">
+              <q-item-section>
+                <q-item-label v-html="scope.opt.label"></q-item-label>
+              </q-item-section>
+            </q-item>
+            <q-item-label v-if="scope.opt.category" v-bind="scope.itemProps" header class="q-pa-sm">{{
+              scope.opt.category
+            }}</q-item-label>
           </template>
         </q-select>
       </div>
@@ -119,18 +129,20 @@
     <q-separator />
     <q-card-section>
       <q-table
+        @request="onRequest"
         dense
         :table-class="{ 'table-bgcolor': !$q.dark.isActive, 'table-bgcolor-dark': $q.dark.isActive }"
         class="audit-mgr-tbl-sticky"
         binary-state-sort
         title="Audit Logs"
-        :data="auditLogs"
+        :rows="auditLogs"
         :columns="columns"
         row-key="id"
-        :pagination.sync="pagination"
+        v-model:pagination="pagination"
         :rows-per-page-options="[25, 50, 100, 500, 1000]"
         :no-data-label="noDataText"
         @row-click="showDetails"
+        virtual-scroll
       >
         <template v-slot:top-right>
           <q-btn color="primary" icon-right="archive" label="Export to csv" no-caps @click="exportLog" />
@@ -156,6 +168,7 @@
 import AuditLogDetail from "@/components/modals/logs/AuditLogDetail";
 import mixins from "@/mixins/mixins";
 import { exportFile } from "quasar";
+import { formatAgentOptions } from "@/utils/format";
 
 function wrapCsvValue(val, formatFn) {
   let formatted = formatFn !== void 0 ? formatFn(val) : val;
@@ -263,16 +276,21 @@ export default {
       ],
       pagination: {
         rowsPerPage: 25,
+        rowsNumber: null,
         sortBy: "entry_time",
         descending: true,
+        page: 1,
       },
     };
   },
   methods: {
     getClients() {
-      this.$axios.get("/clients/clients/").then(r => {
-        this.clientsOptions = Object.freeze(r.data.map(client => ({ label: client.name, value: client.id })));
-      });
+      this.$axios
+        .get("/clients/clients/")
+        .then(r => {
+          this.clientsOptions = Object.freeze(r.data.map(client => ({ label: client.name, value: client.id })));
+        })
+        .catch(e => {});
     },
     getUserOptions(val, update, abort) {
       if (val.length < 2) {
@@ -320,7 +338,7 @@ export default {
         this.$axios
           .post(`logs/auditlogs/optionsfilter/`, data)
           .then(r => {
-            this.agentOptions = Object.freeze(r.data.map(agent => agent.hostname));
+            this.agentOptions = Object.freeze(formatAgentOptions(r.data));
             this.$q.loading.hide();
           })
           .catch(e => {
@@ -355,10 +373,23 @@ export default {
         });
       }
     },
+    onRequest(props) {
+      // needed to update external pagination object
+      const { page, rowsPerPage, sortBy, descending } = props.pagination;
+
+      this.pagination.page = page;
+      this.pagination.rowsPerPage = rowsPerPage;
+      this.pagination.sortBy = sortBy;
+      this.pagination.descending = descending;
+
+      this.search();
+    },
     search() {
       this.$q.loading.show();
       this.searched = true;
-      let data = {};
+      let data = {
+        pagination: this.pagination,
+      };
 
       if (!!this.agentFilter && this.agentFilter.length > 0) data["agentFilter"] = this.agentFilter;
       else if (!!this.clientFilter && this.clientFilter.length > 0) data["clientFilter"] = this.clientFilter;
@@ -371,7 +402,8 @@ export default {
         .patch("/logs/auditlogs/", data)
         .then(r => {
           this.$q.loading.hide();
-          this.auditLogs = Object.freeze(r.data);
+          this.auditLogs = Object.freeze(r.data.audit_logs);
+          this.pagination.rowsNumber = r.data.total;
         })
         .catch(e => {
           this.$q.loading.hide();
@@ -417,7 +449,7 @@ export default {
       return this.searched ? "No data found. Try to refine you search" : "Click search to find audit logs";
     },
   },
-  created() {
+  mounted() {
     this.getClients();
   },
 };

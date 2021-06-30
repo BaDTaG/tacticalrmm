@@ -1,24 +1,36 @@
+import uuid
 from django.test import TestCase, override_settings
 from model_bakery import baker
-
+from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
 from accounts.models import User
 from core.models import CoreSettings
-from rest_framework.authtoken.models import Token
 
 
 class TacticalTestCase(TestCase):
     def authenticate(self):
         self.john = User(username="john")
+        self.john.is_superuser = True
         self.john.set_password("hunter2")
         self.john.save()
+        self.alice = User(username="alice")
+        self.alice.is_superuser = True
+        self.alice.set_password("hunter2")
+        self.alice.save()
         self.client_setup()
         self.client.force_authenticate(user=self.john)
 
+        User.objects.create_user(  # type: ignore
+            username=uuid.uuid4().hex,
+            is_installer_user=True,
+            password=User.objects.make_random_password(60),  # type: ignore
+        )
+
     def setup_agent_auth(self, agent):
         agent_user = User.objects.create_user(
-            username=agent.agent_id, password=User.objects.make_random_password(60)
+            username=agent.agent_id,
+            password=User.objects.make_random_password(60),
         )
         Token.objects.create(user=agent_user)
 

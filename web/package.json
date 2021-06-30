@@ -6,33 +6,28 @@
   "scripts": {
     "serve": "quasar dev",
     "build": "quasar build",
-    "test:unit": "quasar test --unit jest"
+    "test:e2e": "cross-env E2E_TEST=true start-test \"quasar dev\" http-get://localhost:8080 \"cypress open\"",
+    "test:e2e:ci": "cross-env E2E_TEST=true start-test \"quasar dev\" http-get://localhost:8080 \"cypress run\""
   },
   "dependencies": {
-    "@quasar/extras": "^1.9.10",
-    "axios": "^0.21.0",
-    "dotenv": "^8.2.0",
-    "qrcode.vue": "^1.7.0",
-    "quasar": "^1.14.5"
+    "@quasar/extras": "^1.10.8",
+    "apexcharts": "^3.27.1",
+    "axios": "^0.21.1",
+    "dotenv": "^8.6.0",
+    "prismjs": "^1.23.0",
+    "qrcode.vue": "^3.2.2",
+    "quasar": "^2.0.1",
+    "vue-prism-editor": "^2.0.0-alpha.2",
+    "vue3-apexcharts": "^1.4.0",
+    "vuex": "^4.0.2"
   },
   "devDependencies": {
-    "@quasar/app": "^2.1.8",
-    "@quasar/cli": "^1.1.2",
-    "@quasar/quasar-app-extension-testing": "^1.0.0",
-    "@quasar/quasar-app-extension-testing-unit-jest": "^1.0.1",
-    "core-js": "^3.6.5",
-    "flush-promises": "^1.0.2",
-    "fs-extra": "^9.0.1"
+    "@quasar/app": "^3.0.1",
+    "@quasar/cli": "^1.2.1"
   },
   "browserslist": [
-    "last 4 Chrome versions",
-    "last 4 Firefox versions",
-    "last 2 Edge versions",
-    "last 3 Safari versions",
-    "last 3 Android versions",
-    "last 3 ChromeAndroid versions",
-    "last 3 FirefoxAndroid versions",
-    "last 3 iOS versions",
-    "last 2 Opera versions"
+    "last 3 Chrome versions",
+    "last 3 Firefox versions",
+    "last 2 Edge versions"
   ]
 }

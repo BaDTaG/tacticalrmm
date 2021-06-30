@@ -20,13 +20,19 @@
       <q-card-section>
         <q-input
           outlined
-          v-model.number="diskcheck.threshold"
-          label="Threshold (%)"
-          :rules="[
-            val => !!val || '*Required',
-            val => val >= 1 || 'Minimum threshold is 1',
-            val => val < 100 || 'Maximum threshold is 99',
-          ]"
+          type="number"
+          v-model.number="diskcheck.warning_threshold"
+          label="Warning Threshold Remaining (%)"
+          :rules="[val => val >= 0 || 'Minimum threshold is 0', val => val < 100 || 'Maximum threshold is 99']"
+        />
+      </q-card-section>
+      <q-card-section>
+        <q-input
+          outlined
+          type="number"
+          v-model.number="diskcheck.error_threshold"
+          label="Error Threshold Remaining (%)"
+          :rules="[val => val >= 0 || 'Minimum threshold is 0', val => val < 100 || 'Maximum threshold is 99']"
         />
       </q-card-section>
       <q-card-section>
@@ -39,6 +45,16 @@
           label="Number of consecutive failures before alert"
         />
       </q-card-section>
+      <q-card-section>
+        <q-input
+          dense
+          outlined
+          type="number"
+          v-model.number="diskcheck.run_interval"
+          label="Run this check every (seconds)"
+          hint="Setting this value to anything other than 0 will override the 'Run checks every' setting on the agent"
+        />
+      </q-card-section>
       <q-card-actions align="right">
         <q-btn v-if="mode === 'add'" label="Add" color="primary" type="submit" />
         <q-btn v-else-if="mode === 'edit'" label="Edit" color="primary" type="submit" />
@@ -49,11 +65,11 @@
 </template>
 
 <script>
-import axios from "axios";
-import { mapState, mapGetters } from "vuex";
+import { mapGetters } from "vuex";
 import mixins from "@/mixins/mixins";
 export default {
   name: "DiskSpaceCheck",
+  emits: ["close"],
   props: {
     agentpk: Number,
     policypk: Number,
@@ -66,8 +82,10 @@ export default {
       diskcheck: {
         disk: null,
         check_type: "diskspace",
-        threshold: 25,
+        warning_threshold: 25,
+        error_threshold: 10,
         fails_b4_alert: 1,
+        run_interval: 0,
       },
       diskOptions: [],
       failOptions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
@@ -76,47 +94,59 @@ export default {
   methods: {
     setDiskOptions() {
       if (this.policypk) {
-        axios.get("/checks/getalldisks/").then(r => {
-          this.diskOptions = r.data;
-          this.diskcheck.disk = "C:";
-        });
+        this.$axios
+          .get("/checks/getalldisks/")
+          .then(r => {
+            this.diskOptions = r.data;
+            this.diskcheck.disk = "C:";
+          })
+          .catch(e => {});
       } else {
         this.diskOptions = this.agentDisks.map(i => i.device);
         this.diskcheck.disk = this.diskOptions[0];
       }
     },
     getCheck() {
-      axios.get(`/checks/${this.checkpk}/check/`).then(r => (this.diskcheck = r.data));
+      this.$axios
+        .get(`/checks/${this.checkpk}/check/`)
+        .then(r => (this.diskcheck = r.data))
+        .catch(e => {});
     },
     addCheck() {
+      if (!this.isValidThreshold(this.diskcheck.warning_threshold, this.diskcheck.error_threshold, true)) {
+        return;
+      }
+
       const pk = this.policypk ? { policy: this.policypk } : { pk: this.agentpk };
       const data = {
         ...pk,
         check: this.diskcheck,
       };
-      axios
+      this.$axios
         .post("/checks/checks/", data)
         .then(r => {
           this.$emit("close");
           this.reloadChecks();
           this.notifySuccess(r.data);
         })
-        .catch(e => this.notifyError(e.response.data.non_field_errors));
+        .catch(e => {});
     },
     editCheck() {
-      axios
+      if (!this.isValidThreshold(this.diskcheck.warning_threshold, this.diskcheck.error_threshold, true)) {
+        return;
+      }
+
+      this.$axios
         .patch(`/checks/${this.checkpk}/check/`, this.diskcheck)
         .then(r => {
           this.$emit("close");
           this.reloadChecks();
           this.notifySuccess(r.data);
         })
-        .catch(e => this.notifyError(e.response.data.non_field_errors));
+        .catch(e => {});
     },
     reloadChecks() {
-      if (this.policypk) {
-        this.$store.dispatch("automation/loadPolicyChecks", this.policypk);
-      } else {
+      if (this.agentpk) {
         this.$store.dispatch("loadChecks", this.agentpk);
       }
     },
@@ -124,7 +154,7 @@ export default {
   computed: {
     ...mapGetters(["agentDisks"]),
   },
-  created() {
+  mounted() {
     if (this.mode === "add") {
       this.setDiskOptions();
     } else if (this.mode === "edit") {

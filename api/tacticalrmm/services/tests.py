@@ -1,28 +1,15 @@
-from tacticalrmm.test import TacticalTestCase
-from model_bakery import baker
 from unittest.mock import patch
-from .serializers import ServicesSerializer
+
+from model_bakery import baker
+
 from agents.models import Agent
+from tacticalrmm.test import TacticalTestCase
 
 
 class TestServiceViews(TacticalTestCase):
     def setUp(self):
         self.authenticate()
-
-    def test_get_services(self):
-
-        # test a call where agent doesn't exist
-        resp = self.client.get("/services/500/services/", format="json")
-        self.assertEqual(resp.status_code, 404)
-
-        agent = baker.make_recipe("agents.agent_with_services")
-        url = f"/services/{agent.pk}/services/"
-        serializer = ServicesSerializer(agent)
-        resp = self.client.get(url, format="json")
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(serializer.data, resp.data)
-
-        self.check_not_authenticated("get", url)
+        self.setup_coresettings()
 
     def test_default_services(self):
         url = "/services/defaultservices/"
@@ -33,13 +20,13 @@ class TestServiceViews(TacticalTestCase):
         self.check_not_authenticated("get", url)
 
     @patch("agents.models.Agent.nats_cmd")
-    def test_get_refreshed_services(self, nats_cmd):
+    def test_get_services(self, nats_cmd):
         # test a call where agent doesn't exist
-        resp = self.client.get("/services/500/refreshedservices/", format="json")
+        resp = self.client.get("/services/500/services/", format="json")
         self.assertEqual(resp.status_code, 404)
 
         agent = baker.make_recipe("agents.agent_with_services")
-        url = f"/services/{agent.pk}/refreshedservices/"
+        url = f"/services/{agent.pk}/services/"
 
         nats_return = [
             {

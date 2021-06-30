@@ -1,30 +1,31 @@
 import asyncio
+from datetime import datetime as dt
 
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
-
-from rest_framework.views import APIView
+from django.utils import timezone as djangotime
+from packaging import version as pyver
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.decorators import api_view
+from rest_framework.views import APIView
 
-from tacticalrmm.utils import notify_error
 from agents.models import Agent
 from automation.models import Policy
-
-from .models import Check
 from scripts.models import Script
+from tacticalrmm.utils import notify_error
 
-from .serializers import CheckSerializer
-
-
-from automation.tasks import (
-    generate_agent_checks_from_policies_task,
-    delete_policy_check_task,
-    update_policy_check_fields_task,
-)
+from .models import Check, CheckHistory
+from .permissions import ManageChecksPerms, RunChecksPerms
+from .serializers import CheckHistorySerializer, CheckSerializer
 
 
 class AddCheck(APIView):
+    permission_classes = [IsAuthenticated, ManageChecksPerms]
+
     def post(self, request):
+        from automation.tasks import generate_agent_checks_task
+
         policy = None
         agent = None
 
@@ -36,17 +37,6 @@ class AddCheck(APIView):
         else:
             agent = get_object_or_404(Agent, pk=request.data["pk"])
             parent = {"agent": agent}
-            added = "0.11.0"
-            if (
-                request.data["check"]["check_type"] == "script"
-                and request.data["check"]["script_args"]
-                and agent.not_supported(version_added=added)
-            ):
-                return notify_error(
-                    {
-                        "non_field_errors": f"Script arguments only available in agent {added} or greater"
-                    }
-                )
 
         script = None
         if "script" in request.data["check"]:
@@ -58,53 +48,55 @@ class AddCheck(APIView):
             request.data["check"]["check_type"] == "eventlog"
             and request.data["check"]["event_id_is_wildcard"]
         ):
-            if agent and agent.not_supported(version_added="0.10.2"):
-                return notify_error(
-                    {
-                        "non_field_errors": "Wildcard is only available in agent 0.10.2 or greater"
-                    }
-                )
-
             request.data["check"]["event_id"] = 0
 
         serializer = CheckSerializer(
             data=request.data["check"], partial=True, context=parent
         )
         serializer.is_valid(raise_exception=True)
-        obj = serializer.save(**parent, script=script)
+        new_check = serializer.save(**parent, script=script)
 
         # Generate policy Checks
         if policy:
-            generate_agent_checks_from_policies_task.delay(policypk=policy.pk)
+            generate_agent_checks_task.delay(policy=policy.pk)
         elif agent:
-            checks = agent.agentchecks.filter(
-                check_type=obj.check_type, managed_by_policy=True
+            checks = agent.agentchecks.filter(  # type: ignore
+                check_type=new_check.check_type, managed_by_policy=True
             )
 
             # Should only be one
-            duplicate_check = [check for check in checks if check.is_duplicate(obj)]
+            duplicate_check = [
+                check for check in checks if check.is_duplicate(new_check)
+            ]
 
             if duplicate_check:
                 policy = Check.objects.get(pk=duplicate_check[0].parent_check).policy
                 if policy.enforced:
-                    obj.overriden_by_policy = True
-                    obj.save()
+                    new_check.overriden_by_policy = True
+                    new_check.save()
                 else:
                     duplicate_check[0].delete()
 
-        return Response(f"{obj.readable_desc} was added!")
+        return Response(f"{new_check.readable_desc} was added!")
 
 
 class GetUpdateDeleteCheck(APIView):
+    permission_classes = [IsAuthenticated, ManageChecksPerms]
+
     def get(self, request, pk):
         check = get_object_or_404(Check, pk=pk)
         return Response(CheckSerializer(check).data)
 
     def patch(self, request, pk):
+        from automation.tasks import update_policy_check_fields_task
+
         check = get_object_or_404(Check, pk=pk)
 
         # remove fields that should not be changed when editing a check from the frontend
-        if "check_alert" not in request.data.keys():
+        if (
+            "check_alert" not in request.data.keys()
+            and "check_reset" not in request.data.keys()
+        ):
             [request.data.pop(i) for i in check.non_editable_fields]
 
         # set event id to 0 if wildcard because it needs to be an integer field for db
@@ -116,58 +108,36 @@ class GetUpdateDeleteCheck(APIView):
                 pass
             else:
                 if request.data["event_id_is_wildcard"]:
-                    if check.agent.not_supported(version_added="0.10.2"):
-                        return notify_error(
-                            {
-                                "non_field_errors": "Wildcard is only available in agent 0.10.2 or greater"
-                            }
-                        )
-
                     request.data["event_id"] = 0
-
-        elif check.check_type == "script":
-            added = "0.11.0"
-            try:
-                request.data["script_args"]
-            except KeyError:
-                pass
-            else:
-                if request.data["script_args"] and check.agent.not_supported(
-                    version_added=added
-                ):
-                    return notify_error(
-                        {
-                            "non_field_errors": f"Script arguments only available in agent {added} or greater"
-                        }
-                    )
 
         serializer = CheckSerializer(instance=check, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
-        obj = serializer.save()
+        check = serializer.save()
 
-        # Update policy check fields
+        # resolve any alerts that are open
+        if "check_reset" in request.data.keys():
+            if check.alert.filter(resolved=False).exists():
+                check.alert.get(resolved=False).resolve()
+
         if check.policy:
-            update_policy_check_fields_task(checkpk=pk)
+            update_policy_check_fields_task.delay(check=check.pk)
 
-        return Response(f"{obj.readable_desc} was edited!")
+        return Response(f"{check.readable_desc} was edited!")
 
     def delete(self, request, pk):
-        check = get_object_or_404(Check, pk=pk)
+        from automation.tasks import generate_agent_checks_task
 
-        check_pk = check.pk
-        policy_pk = None
-        if check.policy:
-            policy_pk = check.policy.pk
+        check = get_object_or_404(Check, pk=pk)
 
         check.delete()
 
         # Policy check deleted
         if check.policy:
-            delete_policy_check_task.delay(checkpk=check_pk)
+            Check.objects.filter(managed_by_policy=True, parent_check=pk).delete()
 
             # Re-evaluate agent checks is policy was enforced
             if check.policy.enforced:
-                generate_agent_checks_from_policies_task.delay(policypk=policy_pk)
+                generate_agent_checks_task.delay(policy=check.policy)
 
         # Agent check deleted
         elif check.agent:
@@ -176,14 +146,45 @@ class GetUpdateDeleteCheck(APIView):
         return Response(f"{check.readable_desc} was deleted!")
 
 
+class GetCheckHistory(APIView):
+    def patch(self, request, checkpk):
+        check = get_object_or_404(Check, pk=checkpk)
+
+        timeFilter = Q()
+
+        if "timeFilter" in request.data:
+            if request.data["timeFilter"] != 0:
+                timeFilter = Q(
+                    x__lte=djangotime.make_aware(dt.today()),
+                    x__gt=djangotime.make_aware(dt.today())
+                    - djangotime.timedelta(days=request.data["timeFilter"]),
+                )
+
+        check_history = CheckHistory.objects.filter(check_id=checkpk).filter(timeFilter).order_by("-x")  # type: ignore
+
+        return Response(
+            CheckHistorySerializer(
+                check_history, context={"timezone": check.agent.timezone}, many=True
+            ).data
+        )
+
+
 @api_view()
+@permission_classes([IsAuthenticated, RunChecksPerms])
 def run_checks(request, pk):
     agent = get_object_or_404(Agent, pk=pk)
-    if not agent.has_nats:
-        return notify_error("Requires agent version 1.1.0 or greater")
 
-    asyncio.run(agent.nats_cmd({"func": "runchecks"}, wait=False))
-    return Response(agent.hostname)
+    if pyver.parse(agent.version) >= pyver.parse("1.4.1"):
+        r = asyncio.run(agent.nats_cmd({"func": "runchecks"}, timeout=15))
+        if r == "busy":
+            return notify_error(f"Checks are already running on {agent.hostname}")
+        elif r == "ok":
+            return Response(f"Checks will now be re-run on {agent.hostname}")
+        else:
+            return notify_error("Unable to contact the agent")
+    else:
+        asyncio.run(agent.nats_cmd({"func": "runchecks"}, wait=False))
+        return Response(f"Checks will now be re-run on {agent.hostname}")
 
 
 @api_view()

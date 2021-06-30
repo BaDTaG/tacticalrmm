@@ -4,9 +4,9 @@
       dense
       :table-class="{ 'table-bgcolor': !$q.dark.isActive, 'table-bgcolor-dark': $q.dark.isActive }"
       class="remote-bg-tbl-sticky"
-      :data="procs"
+      :rows="procs"
       :columns="columns"
-      :pagination.sync="pagination"
+      v-model:pagination="pagination"
       :filter="filter"
       row-key="id"
       binary-state-sort
@@ -41,7 +41,7 @@
           </template>
         </q-input>
       </template>
-      <template slot="body" slot-scope="props" :props="props">
+      <template v-slot:body="props">
         <q-tr :props="props">
           <q-menu context-menu>
             <q-list dense style="min-width: 200px">
@@ -54,10 +54,8 @@
             </q-list>
           </q-menu>
           <q-td>{{ props.row.name }}</q-td>
-          <!-- <q-td>{{ Math.ceil(props.row.cpu_percent) }}%</q-td>
-          <q-td>{{ convert(props.row.memory_percent) }} MB</q-td> -->
           <q-td>{{ props.row.cpu_percent }}%</q-td>
-          <q-td>{{ props.row.memory_percent }}</q-td>
+          <q-td>{{ bytes2Human(props.row.membytes) }}</q-td>
           <q-td>{{ props.row.username }}</q-td>
           <q-td>{{ props.row.pid }}</q-td>
           <q-td>{{ props.row.status }}</q-td>
@@ -104,9 +102,9 @@ export default {
           sort: (a, b, rowA, rowB) => parseInt(b) < parseInt(a),
         },
         {
-          name: "memory_percent",
+          name: "membytes",
           label: "Memory",
-          field: "memory_percent",
+          field: "membytes",
           align: "left",
           sortable: true,
         },
@@ -146,15 +144,11 @@ export default {
         })
         .catch(e => {
           this.$q.loading.hide();
-          this.notifyError(e.response.data, 4000);
         });
     },
     refreshProcs() {
       this.polling = setInterval(() => {
-        this.$axios
-          .get(`/agents/${this.pk}/getprocs/`)
-          .then(r => (this.procs = r.data))
-          .catch(() => console.log("Unable to contact the agent"));
+        this.$axios.get(`/agents/${this.pk}/getprocs/`).then(r => (this.procs = r.data));
       }, this.pollInterval * 1000);
     },
     killProc(pid, name) {
@@ -167,7 +161,6 @@ export default {
         })
         .catch(e => {
           this.$q.loading.hide();
-          this.notifyError(e.response.data);
         });
     },
     stopPoll() {
@@ -194,24 +187,33 @@ export default {
       this.refreshProcs();
     },
     getAgent() {
-      this.$axios.get(`/agents/${this.pk}/agentdetail/`).then(r => (this.mem = r.data.total_ram));
+      this.$axios
+        .get(`/agents/${this.pk}/agentdetail/`)
+        .then(r => (this.mem = r.data.total_ram))
+        .catch(e => {});
     },
     convert(percent) {
       const mb = this.mem * 1024;
       return Math.ceil((percent * mb) / 100).toLocaleString();
     },
+    bytes2Human(bytes) {
+      if (bytes == 0) return "0B";
+      const k = 1024;
+      const sizes = ["B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+    },
   },
-  beforeDestroy() {
+  beforeUnmount() {
     clearInterval(this.polling);
   },
-  created() {
+  mounted() {
     this.getAgent();
     // disable loading bar
     this.$q.loadingBar.setDefaults({ size: "0px" });
 
     this.getProcesses();
-  },
-  mounted() {
+
     this.refreshProcs();
   },
 };

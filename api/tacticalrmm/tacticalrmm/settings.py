@@ -1,8 +1,8 @@
 import os
-from pathlib import Path
 from datetime import timedelta
+from pathlib import Path
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 SCRIPTS_DIR = "/srv/salt/scripts"
 
@@ -15,31 +15,41 @@ EXE_DIR = os.path.join(BASE_DIR, "tacticalrmm/private/exe")
 AUTH_USER_MODEL = "accounts.User"
 
 # latest release
-TRMM_VERSION = "0.2.3"
+TRMM_VERSION = "0.7.2"
 
 # bump this version everytime vue code is changed
 # to alert user they need to manually refresh their browser
-APP_VER = "0.0.92"
-
-# https://github.com/wh1te909/salt
-LATEST_SALT_VER = "1.1.0"
+APP_VER = "0.0.141"
 
 # https://github.com/wh1te909/rmmagent
-LATEST_AGENT_VER = "1.1.0"
+LATEST_AGENT_VER = "1.5.9"
 
-MESH_VER = "0.6.84"
-
-SALT_MASTER_VER = "3002.2"
+MESH_VER = "0.8.60"
 
 # for the update script, bump when need to recreate venv or npm install
-PIP_VER = "3"
-NPM_VER = "2"
+PIP_VER = "19"
+NPM_VER = "19"
+
+SETUPTOOLS_VER = "57.0.0"
+WHEEL_VER = "0.36.2"
 
 DL_64 = f"https://github.com/wh1te909/rmmagent/releases/download/v{LATEST_AGENT_VER}/winagent-v{LATEST_AGENT_VER}.exe"
 DL_32 = f"https://github.com/wh1te909/rmmagent/releases/download/v{LATEST_AGENT_VER}/winagent-v{LATEST_AGENT_VER}-x86.exe"
 
-SALT_64 = f"https://github.com/wh1te909/salt/releases/download/{LATEST_SALT_VER}/salt-minion-setup.exe"
-SALT_32 = f"https://github.com/wh1te909/salt/releases/download/{LATEST_SALT_VER}/salt-minion-setup-x86.exe"
+EXE_GEN_URLS = [
+    "https://exe2.tacticalrmm.io",
+    "https://exe.tacticalrmm.io",
+]
+
+DEFAULT_AUTO_FIELD = "django.db.models.AutoField"
+
+ASGI_APPLICATION = "tacticalrmm.asgi.application"
+
+REST_KNOX = {
+    "TOKEN_TTL": timedelta(hours=5),
+    "AUTO_REFRESH": True,
+    "MIN_REFRESH_INTERVAL": 600,
+}
 
 try:
     from .local_settings import *
@@ -47,19 +57,16 @@ except ImportError:
     pass
 
 INSTALLED_APPS = [
-    "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
     "django.contrib.sessions",
-    "django.contrib.messages",
     "django.contrib.staticfiles",
+    "channels",
     "rest_framework",
     "rest_framework.authtoken",
     "knox",
     "corsheaders",
     "accounts",
-    "api",
-    "apiv2",
     "apiv3",
     "clients",
     "agents",
@@ -75,9 +82,28 @@ INSTALLED_APPS = [
     "alerts",
 ]
 
-if not "TRAVIS" in os.environ and not "AZPIPELINE" in os.environ:
-    if DEBUG:
+if not "AZPIPELINE" in os.environ:
+    if DEBUG:  # type: ignore
         INSTALLED_APPS += ("django_extensions",)
+
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels_redis.core.RedisChannelLayer",
+            "CONFIG": {
+                "hosts": [(REDIS_HOST, 6379)],  # type: ignore
+            },
+        },
+    }
+
+if "AZPIPELINE" in os.environ:
+    ADMIN_ENABLED = False
+
+if ADMIN_ENABLED:  # type: ignore
+    INSTALLED_APPS += (
+        "django.contrib.admin",
+        "django.contrib.messages",
+    )
+
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
@@ -87,16 +113,12 @@ MIDDLEWARE = [
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "tacticalrmm.middleware.AuditMiddleware",
-    "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
+if ADMIN_ENABLED:  # type: ignore
+    MIDDLEWARE += ("django.contrib.messages.middleware.MessageMiddleware",)
 
-REST_KNOX = {
-    "TOKEN_TTL": timedelta(hours=5),
-    "AUTO_REFRESH": True,
-    "MIN_REFRESH_INTERVAL": 600,
-}
 
 ROOT_URLCONF = "tacticalrmm.urls"
 
@@ -156,39 +178,6 @@ LOG_CONFIG = {
     "handlers": [{"sink": os.path.join(LOG_DIR, "debug.log"), "serialize": False}]
 }
 
-if "TRAVIS" in os.environ:
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": "travisci",
-            "USER": "travisci",
-            "PASSWORD": "travisSuperSekret6645",
-            "HOST": "127.0.0.1",
-            "PORT": "",
-        }
-    }
-
-    REST_FRAMEWORK = {
-        "DATETIME_FORMAT": "%b-%d-%Y - %H:%M",
-        "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
-        "DEFAULT_AUTHENTICATION_CLASSES": ("knox.auth.TokenAuthentication",),
-        "DEFAULT_RENDERER_CLASSES": ("rest_framework.renderers.JSONRenderer",),
-    }
-
-    DEBUG = True
-    SECRET_KEY = "abcdefghijklmnoptravis123456789"
-
-    ADMIN_URL = "abc123456/"
-
-    SCRIPTS_DIR = os.path.join(Path(BASE_DIR).parents[1], "scripts")
-    SALT_USERNAME = "travis"
-    SALT_PASSWORD = "travis"
-    MESH_USERNAME = "travis"
-    MESH_SITE = "https://example.com"
-    MESH_TOKEN_KEY = "bd65e957a1e70c622d32523f61508400d6cd0937001a7ac12042227eba0b9ed625233851a316d4f489f02994145f74537a331415d00047dbbf13d940f556806dffe7a8ce1de216dc49edbad0c1a7399c"
-    REDIS_HOST = "localhost"
-    SALT_HOST = "127.0.0.1"
-
 if "AZPIPELINE" in os.environ:
     DATABASES = {
         "default": {
@@ -208,16 +197,15 @@ if "AZPIPELINE" in os.environ:
         "DEFAULT_RENDERER_CLASSES": ("rest_framework.renderers.JSONRenderer",),
     }
 
+    ALLOWED_HOSTS = ["api.example.com"]
     DEBUG = True
     SECRET_KEY = "abcdefghijklmnoptravis123456789"
 
     ADMIN_URL = "abc123456/"
 
     SCRIPTS_DIR = os.path.join(Path(BASE_DIR).parents[1], "scripts")
-    SALT_USERNAME = "pipeline"
-    SALT_PASSWORD = "pipeline"
     MESH_USERNAME = "pipeline"
     MESH_SITE = "https://example.com"
     MESH_TOKEN_KEY = "bd65e957a1e70c622d32523f61508400d6cd0937001a7ac12042227eba0b9ed625233851a316d4f489f02994145f74537a331415d00047dbbf13d940f556806dffe7a8ce1de216dc49edbad0c1a7399c"
     REDIS_HOST = "localhost"
-    SALT_HOST = "127.0.0.1"
+    KEEP_SALT = False

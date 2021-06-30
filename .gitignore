@@ -45,3 +45,6 @@ htmlcov/
 docker-compose.dev.yml
 docs/.vuepress/dist
 nats-rmm.conf
+.mypy_cache
+docs/site/
+reset_db.sh

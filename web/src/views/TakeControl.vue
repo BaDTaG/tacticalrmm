@@ -11,16 +11,25 @@
       <q-space />
     </div>
 
-    <q-video v-show="visible" :ratio="16 / 9" :src="control"></q-video>
+    <q-video v-show="visible" :ratio="16 / 9" :src="control" style="padding-bottom: 51%"></q-video>
   </div>
 </template>
 
 <script>
 import mixins from "@/mixins/mixins";
 
+import { createMetaMixin } from "quasar";
+
 export default {
   name: "TakeControl",
-  mixins: [mixins],
+  mixins: [
+    mixins,
+    createMetaMixin(function () {
+      return {
+        title: this.title,
+      };
+    }),
+  ],
   data() {
     return {
       control: "",
@@ -48,12 +57,13 @@ export default {
       }
     },
   },
-  meta() {
-    return {
-      title: this.title,
-    };
-  },
   methods: {
+    getUI() {
+      this.$store.dispatch("getDashInfo").then(r => {
+        this.$q.dark.set(r.data.dark_mode);
+        this.$q.loadingBar.setDefaults({ color: r.data.loading_bar_color });
+      });
+    },
     genURL() {
       this.$q.loading.show();
       this.visible = false;
@@ -69,7 +79,6 @@ export default {
         .catch(e => {
           this.visible = true;
           this.$q.loading.hide();
-          this.notifyError("Something went wrong");
         });
     },
     restart() {
@@ -93,7 +102,6 @@ export default {
         .catch(e => {
           this.visible = true;
           this.$q.loading.hide();
-          this.notifyError(e.response.data);
         });
     },
     repair() {
@@ -112,11 +120,11 @@ export default {
         .catch(e => {
           this.visible = true;
           this.$q.loading.hide();
-          this.notifyError(e.response.data);
         });
     },
   },
-  created() {
+  mounted() {
+    this.getUI();
     this.genURL();
   },
 };

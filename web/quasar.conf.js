@@ -16,7 +16,7 @@ module.exports = function () {
     // https://github.com/quasarframework/quasar/tree/dev/extras
     extras: [
       // 'ionicons-v4',
-      // 'mdi-v5',
+      'mdi-v5',
       'fontawesome-v5',
       // 'eva-icons',
       // 'themify',
@@ -32,6 +32,7 @@ module.exports = function () {
       env: { DEV_API: process.env.DEV_URL, PROD_API: process.env.PROD_URL, DOCKER_BUILD: process.env.DOCKER_BUILD },
       vueRouterMode: 'history', // available values: 'hash', 'history'
       distDir: "dist/",
+      devtool: process.env.NODE_ENV === "production" ? "cheap-module-eval-source-map" : "source-map",
 
       // Add dependencies for transpiling with Babel (Array of regexes)
       // (from node_modules, which are by default not transpiled).
@@ -68,15 +69,7 @@ module.exports = function () {
     // https://quasar.dev/quasar-cli/quasar-conf-js#Property%3A-framework
     framework: {
       iconSet: 'material-icons', // Quasar icon set
-      lang: 'en-us', // Quasar language pack
-
-      // * 'auto' - Auto-import needed Quasar components & directives
-      //            (slightly higher compile time; next to minimum bundle size; most convenient)
-      // * false  - Manually specify what to import
-      //            (fastest compile time; minimum bundle size; most tedious)
-      // * true   - Import everything from Quasar
-      //            (not treeshaking Quasar; biggest bundle size; convenient)
-      importStrategy: 'auto',
+      lang: 'en-US', // Quasar language pack
 
       // Quasar plugins
       plugins: [
@@ -88,7 +81,6 @@ module.exports = function () {
       ],
       config: {
         loadingBar: {
-          color: "red",
           size: "4px"
         },
         notify: {
@@ -96,6 +88,9 @@ module.exports = function () {
           timeout: 2000,
           textColor: "white",
           actions: [{ icon: "close", color: "white" }]
+        },
+        loading: {
+          delay: 50
         }
       }
     },

@@ -1,22 +1,24 @@
-from django.core.management.base import BaseCommand
-from django.conf import settings
-from core.models import CoreSettings
-from .helpers import get_auth_token
 import asyncio
-import websockets
 import json
+
+import websockets
+from django.conf import settings
+from django.core.management.base import BaseCommand
+
+from core.models import CoreSettings
+
+from .helpers import get_auth_token
 
 
 class Command(BaseCommand):
     help = "Sets up initial mesh central configuration"
 
     async def websocket_call(self, mesh_settings):
-        token = get_auth_token(
-            mesh_settings.mesh_username, mesh_settings.mesh_token
-        )
+        token = get_auth_token(mesh_settings.mesh_username, mesh_settings.mesh_token)
 
-        if settings.MESH_WS_URL:
-            uri = f"{settings.MESH_WS_URL}/control.ashx?auth={token}"
+        if settings.DOCKER_BUILD:
+            site = mesh_settings.mesh_site.replace("https", "ws")
+            uri = f"{site}:443/control.ashx?auth={token}"
         else:
             site = mesh_settings.mesh_site.replace("https", "wss")
             uri = f"{site}/control.ashx?auth={token}"

@@ -12,28 +12,11 @@
                 </q-item-section>
                 <q-menu anchor="top right" self="top left">
                   <q-list dense style="min-width: 100px">
-                    <q-item clickable v-close-popup @click="showClientsFormModal('client', 'add')">
-                      <q-item-section>Add Client</q-item-section>
+                    <q-item clickable v-close-popup @click="showAddClientModal">
+                      <q-item-section>Client</q-item-section>
                     </q-item>
-                    <q-item clickable v-close-popup @click="showClientsFormModal('site', 'add')">
-                      <q-item-section>Add Site</q-item-section>
-                    </q-item>
-                  </q-list>
-                </q-menu>
-              </q-item>
-
-              <q-item clickable>
-                <q-item-section>Delete</q-item-section>
-                <q-item-section side>
-                  <q-icon name="keyboard_arrow_right" />
-                </q-item-section>
-                <q-menu anchor="top right" self="top left">
-                  <q-list dense style="min-width: 100px">
-                    <q-item clickable v-close-popup @click="showClientsFormModal('client', 'delete')">
-                      <q-item-section>Delete Client</q-item-section>
-                    </q-item>
-                    <q-item clickable v-close-popup @click="showClientsFormModal('site', 'delete')">
-                      <q-item-section>Delete Site</q-item-section>
+                    <q-item clickable v-close-popup @click="showAddSiteModal">
+                      <q-item-section>Site</q-item-section>
                     </q-item>
                   </q-list>
                 </q-menu>
@@ -47,19 +30,6 @@
               </q-item>
               <q-item clickable v-close-popup @click="showDebugLog = true">
                 <q-item-section>Debug Log</q-item-section>
-              </q-item>
-            </q-list>
-          </q-menu>
-        </q-btn>
-        <!-- edit -->
-        <q-btn size="md" dense no-caps flat label="Edit">
-          <q-menu>
-            <q-list dense style="min-width: 100px">
-              <q-item clickable v-close-popup @click="showClientsFormModal('client', 'edit')">
-                <q-item-section>Edit Clients</q-item-section>
-              </q-item>
-              <q-item clickable v-close-popup @click="showClientsFormModal('site', 'edit')">
-                <q-item-section>Edit Sites</q-item-section>
               </q-item>
             </q-list>
           </q-menu>
@@ -95,13 +65,25 @@
         <q-btn size="md" dense no-caps flat label="Settings">
           <q-menu auto-close>
             <q-list dense style="min-width: 100px">
+              <!-- clients manager -->
+              <q-item clickable v-close-popup @click="showClientsManager">
+                <q-item-section>Clients Manager</q-item-section>
+              </q-item>
               <!-- script manager -->
-              <q-item clickable v-close-popup @click="showScriptManager">
+              <q-item clickable v-close-popup @click="showScriptManager = true">
                 <q-item-section>Script Manager</q-item-section>
               </q-item>
               <!-- automation manager -->
-              <q-item clickable v-close-popup @click="showAutomationManager = true">
+              <q-item clickable v-close-popup @click="showAutomationManager">
                 <q-item-section>Automation Manager</q-item-section>
+              </q-item>
+              <!-- alerts manager -->
+              <q-item clickable v-close-popup @click="showAlertsManager">
+                <q-item-section>Alerts Manager</q-item-section>
+              </q-item>
+              <!-- permissions manager -->
+              <q-item clickable v-close-popup @click="showPermissionsManager">
+                <q-item-section>Permissions Manager</q-item-section>
               </q-item>
               <!-- admin manager -->
               <q-item clickable v-close-popup @click="showAdminManager = true">
@@ -110,6 +92,10 @@
               <!-- core settings -->
               <q-item clickable v-close-popup @click="showEditCoreSettingsModal = true">
                 <q-item-section>Global Settings</q-item-section>
+              </q-item>
+              <!-- code sign -->
+              <q-item v-if="!hosted" clickable v-close-popup @click="showCodeSign = true">
+                <q-item-section>Code Signing</q-item-section>
               </q-item>
             </q-list>
           </q-menu>
@@ -130,19 +116,34 @@
               <q-item clickable v-close-popup @click="showBulkActionModal('scan')">
                 <q-item-section>Bulk Patch Management</q-item-section>
               </q-item>
+              <!-- server maintenance -->
+              <q-item clickable v-close-popup @click="showServerMaintenance = true">
+                <q-item-section>Server Maintenance</q-item-section>
+              </q-item>
+            </q-list>
+          </q-menu>
+        </q-btn>
+        <!-- help -->
+        <q-btn v-if="!hosted" size="md" dense no-caps flat label="Help">
+          <q-menu auto-close>
+            <q-list dense style="min-width: 100px">
+              <q-item clickable v-close-popup @click="openHelp('docs')">
+                <q-item-section>Documentation</q-item-section>
+              </q-item>
+              <q-item clickable v-close-popup @click="openHelp('bug')">
+                <q-item-section>Bug Report</q-item-section>
+              </q-item>
+              <q-item clickable v-close-popup @click="openHelp('feature')">
+                <q-item-section>Feature Request</q-item-section>
+              </q-item>
+              <q-item clickable v-close-popup @click="openHelp('discord')">
+                <q-item-section>Join Discord</q-item-section>
+              </q-item>
             </q-list>
           </q-menu>
         </q-btn>
       </q-btn-group>
       <q-space />
-      <!-- client form modal -->
-      <q-dialog v-model="showClientFormModal" @hide="closeClientsFormModal">
-        <ClientsForm @close="closeClientsFormModal" :op="clientOp" @edited="edited" />
-      </q-dialog>
-      <!-- site form modal -->
-      <q-dialog v-model="showSiteFormModal" @hide="closeClientsFormModal">
-        <SitesForm @close="closeClientsFormModal" :op="clientOp" @edited="edited" />
-      </q-dialog>
       <!-- edit core settings modal -->
       <q-dialog v-model="showEditCoreSettingsModal">
         <EditCoreSettings @close="showEditCoreSettingsModal = false" />
@@ -174,16 +175,13 @@
       <!-- Update Agents Modal -->
       <div class="q-pa-md q-gutter-sm">
         <q-dialog v-model="showUpdateAgentsModal" maximized transition-show="slide-up" transition-hide="slide-down">
-          <UpdateAgents @close="showUpdateAgentsModal = false" />
+          <UpdateAgents @close="showUpdateAgentsModal = false" @edit="edited" />
         </q-dialog>
       </div>
       <!-- Script Manager -->
-      <ScriptManager />
-
-      <!-- Automation Manager -->
       <div class="q-pa-md q-gutter-sm">
-        <q-dialog v-model="showAutomationManager">
-          <AutomationManager @close="showAutomationManager = false" />
+        <q-dialog v-model="showScriptManager">
+          <ScriptManager @close="showScriptManager = false" />
         </q-dialog>
       </div>
       <!-- Admin Manager -->
@@ -196,15 +194,21 @@
       <q-dialog v-model="showUploadMesh">
         <UploadMesh @close="showUploadMesh = false" />
       </q-dialog>
-
       <!-- Bulk action modal -->
       <q-dialog v-model="showBulkAction" @hide="closeBulkActionModal" position="top">
         <BulkAction :mode="bulkMode" @close="closeBulkActionModal" />
       </q-dialog>
-
       <!-- Agent Deployment -->
       <q-dialog v-model="showDeployment">
         <Deployment @close="showDeployment = false" />
+      </q-dialog>
+      <!-- Server Maintenance -->
+      <q-dialog v-model="showServerMaintenance">
+        <ServerMaintenance @close="showMaintenance = false" />
+      </q-dialog>
+      <!-- Code Sign -->
+      <q-dialog v-model="showCodeSign">
+        <CodeSign @close="showCodeSign = false" />
       </q-dialog>
     </q-bar>
   </div>
@@ -213,11 +217,13 @@
 <script>
 import LogModal from "@/components/modals/logs/LogModal";
 import PendingActions from "@/components/modals/logs/PendingActions";
+import ClientsManager from "@/components/ClientsManager";
 import ClientsForm from "@/components/modals/clients/ClientsForm";
 import SitesForm from "@/components/modals/clients/SitesForm";
 import UpdateAgents from "@/components/modals/agents/UpdateAgents";
 import ScriptManager from "@/components/ScriptManager";
 import EditCoreSettings from "@/components/modals/coresettings/EditCoreSettings";
+import AlertsManager from "@/components/AlertsManager";
 import AutomationManager from "@/components/automation/AutomationManager";
 import AdminManager from "@/components/AdminManager";
 import InstallAgent from "@/components/modals/agents/InstallAgent";
@@ -225,34 +231,34 @@ import UploadMesh from "@/components/modals/core/UploadMesh";
 import AuditManager from "@/components/AuditManager";
 import BulkAction from "@/components/modals/agents/BulkAction";
 import Deployment from "@/components/Deployment";
+import ServerMaintenance from "@/components/modals/core/ServerMaintenance";
+import CodeSign from "@/components/modals/coresettings/CodeSign";
+import PermissionsManager from "@/components/PermissionsManager";
 
 export default {
   name: "FileBar",
+  emits: ["edit"],
   components: {
     LogModal,
     PendingActions,
-    ClientsForm,
-    SitesForm,
     UpdateAgents,
     ScriptManager,
     EditCoreSettings,
-    AutomationManager,
     InstallAgent,
     UploadMesh,
     AdminManager,
     AuditManager,
     BulkAction,
     Deployment,
+    ServerMaintenance,
+    CodeSign,
+    PermissionsManager,
   },
-  props: ["clients"],
   data() {
     return {
-      showClientFormModal: false,
-      showSiteFormModal: false,
-      clientOp: null,
+      showServerMaintenance: false,
       showUpdateAgentsModal: false,
       showEditCoreSettingsModal: false,
-      showAutomationManager: false,
       showAdminManager: false,
       showInstallAgent: false,
       showUploadMesh: false,
@@ -262,22 +268,33 @@ export default {
       bulkMode: null,
       showDeployment: false,
       showDebugLog: false,
+      showScriptManager: false,
+      showCodeSign: false,
     };
   },
-  methods: {
-    showClientsFormModal(type, op) {
-      this.clientOp = op;
-
-      if (type === "client") {
-        this.showClientFormModal = true;
-      } else if (type === "site") {
-        this.showSiteFormModal = true;
-      }
+  computed: {
+    hosted() {
+      return this.$store.state.hosted;
     },
-    closeClientsFormModal() {
-      this.clientOp = null;
-      this.showClientFormModal = null;
-      this.showSiteFormModal = null;
+  },
+  methods: {
+    openHelp(mode) {
+      let url;
+      switch (mode) {
+        case "docs":
+          url = "https://wh1te909.github.io/tacticalrmm/";
+          break;
+        case "bug":
+          url = "https://github.com/wh1te909/tacticalrmm/issues/new?template=bug_report.md";
+          break;
+        case "feature":
+          url = "https://github.com/wh1te909/tacticalrmm/issues/new?template=feature_request.md";
+          break;
+        case "discord":
+          url = "https://discord.gg/upGTkWp";
+          break;
+      }
+      window.open(url, "_blank");
     },
     showBulkActionModal(mode) {
       this.bulkMode = mode;
@@ -287,11 +304,38 @@ export default {
       this.bulkMode = null;
       this.showBulkAction = false;
     },
-    showScriptManager() {
-      this.$store.commit("TOGGLE_SCRIPT_MANAGER", true);
+    showAutomationManager() {
+      this.$q.dialog({
+        component: AutomationManager,
+      });
+    },
+    showAlertsManager() {
+      this.$q.dialog({
+        component: AlertsManager,
+      });
+    },
+    showClientsManager() {
+      this.$q.dialog({
+        component: ClientsManager,
+      });
+    },
+    showAddClientModal() {
+      this.$q.dialog({
+        component: ClientsForm,
+      });
+    },
+    showAddSiteModal() {
+      this.$q.dialog({
+        component: SitesForm,
+      });
+    },
+    showPermissionsManager() {
+      this.$q.dialog({
+        component: PermissionsManager,
+      });
     },
     edited() {
-      this.$emit("edited");
+      this.$emit("edit");
     },
   },
 };

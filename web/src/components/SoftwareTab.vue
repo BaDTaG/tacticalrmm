@@ -1,6 +1,5 @@
 <template>
   <div v-if="!this.selectedAgentPk">No agent selected</div>
-  <div v-else-if="!Array.isArray(software) || !software.length">No software</div>
   <div v-else>
     <div class="row q-pt-xs items-start">
       <q-btn
@@ -25,10 +24,10 @@
       class="tabs-tbl-sticky"
       :style="{ 'max-height': tabsTableHeight }"
       dense
-      :data="software"
+      :rows="software"
       :columns="columns"
       :filter="filter"
-      :pagination.sync="pagination"
+      v-model:pagination="pagination"
       binary-state-sort
       hide-bottom
       row-key="id"
@@ -46,7 +45,6 @@
 </template>
 
 <script>
-import axios from "axios";
 import mixins from "@/mixins/mixins";
 import { mapGetters } from "vuex";
 import { mapState } from "vuex";
@@ -88,6 +86,9 @@ export default {
           label: "Installed On",
           field: "install_date",
           sortable: false,
+          format: (val, row) => {
+            return val === "01/01/1" || val === "01-1-01" ? "" : val;
+          },
         },
         {
           name: "size",
@@ -110,7 +111,7 @@ export default {
     refreshSoftware() {
       const pk = this.selectedAgentPk;
       this.loading = true;
-      axios
+      this.$axios
         .get(`/software/refresh/${pk}`)
         .then(r => {
           this.$store.dispatch("loadInstalledSoftware", pk);
@@ -118,7 +119,6 @@ export default {
         })
         .catch(e => {
           this.loading = false;
-          this.notifyError(e.response.data);
         });
     },
   },

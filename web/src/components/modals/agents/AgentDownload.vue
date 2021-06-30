@@ -26,23 +26,19 @@
       >
         <div class="q-pa-xs q-gutter-xs">
           <q-badge class="text-caption q-mr-xs" color="grey" text-color="black">
-            <code>--log DEBUG</code>
+            <code>-log debug</code>
           </q-badge>
           <span>To enable verbose output during the install</span>
         </div>
         <div class="q-pa-xs q-gutter-xs">
           <q-badge class="text-caption q-mr-xs" color="grey" text-color="black">
-            <code>--local-salt "C:\\&lt;some folder or path&gt;\\salt-minion-setup.exe"</code>
+            <code>-silent</code>
           </q-badge>
-          <span>
-            To skip downloading the salt-minion during the install. Download it
-            <a v-if="info.arch === '64'" :href="info.data.salt64">here</a>
-            <a v-else :href="info.data.salt32">here</a>
-          </span>
+          <span>Do not popup any message boxes during install</span>
         </div>
         <div class="q-pa-xs q-gutter-xs">
           <q-badge class="text-caption q-mr-xs" color="grey" text-color="black">
-            <code>--local-mesh "C:\\&lt;some folder or path&gt;\\meshagent.exe"</code>
+            <code>-local-mesh "C:\\&lt;some folder or path&gt;\\meshagent.exe"</code>
           </q-badge>
           <span>
             To skip downloading the Mesh Agent during the install. Download it
@@ -53,15 +49,33 @@
         </div>
         <div class="q-pa-xs q-gutter-xs">
           <q-badge class="text-caption q-mr-xs" color="grey" text-color="black">
-            <code>--cert "C:\\&lt;some folder or path&gt;\\ca.pem"</code>
+            <code>-meshdir "C:\Program Files\Your Company Name\Mesh Agent"</code>
+          </q-badge>
+          <span>Specify full path to the directory containing MeshAgent.exe if using custom agent branding</span>
+        </div>
+        <div class="q-pa-xs q-gutter-xs">
+          <q-badge class="text-caption q-mr-xs" color="grey" text-color="black">
+            <code>-nomesh</code>
+          </q-badge>
+          <span>Don't install the mesh agent</span>
+        </div>
+        <div class="q-pa-xs q-gutter-xs">
+          <q-badge class="text-caption q-mr-xs" color="grey" text-color="black">
+            <code>-cert "C:\\&lt;some folder or path&gt;\\ca.pem"</code>
           </q-badge>
           <span> To use a domain CA </span>
         </div>
         <div class="q-pa-xs q-gutter-xs">
           <q-badge class="text-caption q-mr-xs" color="grey" text-color="black">
-            <code>--timeout NUMBER_IN_SECONDS</code>
+            <code>-desc "Desired custom description on agent"</code>
           </q-badge>
-          <span> To increase the default timeout of 900 seconds for the installer. Use on slow computers.</span>
+          <span> Set agent description field during install </span>
+        </div>
+        <div class="q-pa-xs q-gutter-xs">
+          <q-badge class="text-caption q-mr-xs" color="grey" text-color="black">
+            <code>-proxy "http://proxyserver:port"</code>
+          </q-badge>
+          <span>Use a http proxy</span>
         </div>
       </q-expansion-item>
       <br />
@@ -90,7 +104,7 @@ export default {
           link.download = fileName;
           link.click();
         })
-        .catch(e => this.notifyError(e.response.data));
+        .catch(e => {});
     },
   },
 };

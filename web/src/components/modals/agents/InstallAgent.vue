@@ -19,7 +19,7 @@
             label="Client"
             v-model="client"
             :options="client_options"
-            @input="site = sites[0]"
+            @update:model-value="site = sites[0]"
           />
         </q-card-section>
         <q-card-section class="q-gutter-sm">
@@ -27,7 +27,7 @@
         </q-card-section>
         <q-card-section>
           <div class="q-gutter-sm">
-            <q-radio v-model="agenttype" val="server" label="Server" @input="power = false" />
+            <q-radio v-model="agenttype" val="server" label="Server" @update:model-value="power = false" />
             <q-radio v-model="agenttype" val="workstation" label="Workstation" />
           </div>
         </q-card-section>
@@ -47,7 +47,9 @@
         <q-card-section>
           <div class="q-gutter-sm">
             <q-checkbox v-model="rdp" dense label="Enable RDP" />
-            <q-checkbox v-model="ping" dense label="Enable Ping" />
+            <q-checkbox v-model="ping" dense label="Enable Ping">
+              <q-tooltip> Enable ICMP echo requests in the local firewall </q-tooltip>
+            </q-checkbox>
             <q-checkbox v-model="power" dense v-show="agenttype === 'workstation'" label="Disable sleep/hibernate" />
           </div>
         </q-card-section>
@@ -78,7 +80,6 @@
 </template>
 
 <script>
-import axios from "axios";
 import mixins from "@/mixins/mixins";
 import AgentDownload from "@/components/modals/agents/AgentDownload";
 import { getBaseUrl } from "@/boot/axios";
@@ -87,13 +88,16 @@ export default {
   name: "InstallAgent",
   mixins: [mixins],
   components: { AgentDownload },
+  props: {
+    sitepk: Number,
+  },
   data() {
     return {
       client_options: [],
       client: null,
       site: null,
       agenttype: "server",
-      expires: 720,
+      expires: 24,
       power: false,
       rdp: false,
       ping: false,
@@ -106,16 +110,26 @@ export default {
   methods: {
     getClients() {
       this.$q.loading.show();
-      axios
+      this.$axios
         .get("/clients/clients/")
         .then(r => {
           this.client_options = this.formatClientOptions(r.data);
-          this.client = this.client_options[0];
-          this.site = this.sites[0];
+          if (this.sitepk !== undefined && this.sitepk !== null) {
+            this.client_options.forEach(client => {
+              let site = client.sites.find(site => site.id === this.sitepk);
+
+              if (site !== undefined) {
+                this.client = client;
+                this.site = { value: site.id, label: site.name };
+              }
+            });
+          } else {
+            this.client = this.client_options[0];
+            this.site = this.sites[0];
+          }
           this.$q.loading.hide();
         })
         .catch(() => {
-          this.notifyError("Something went wrong");
           this.$q.loading.hide();
         });
     },
@@ -130,6 +144,11 @@ export default {
         .toLowerCase()
         .replace(/([^a-zA-Z0-9]+)/g, "");
 
+      const fileName =
+        this.arch === "64"
+          ? `rmm-${clientStripped}-${siteStripped}-${this.agenttype}.exe`
+          : `rmm-${clientStripped}-${siteStripped}-${this.agenttype}-x86.exe`;
+
       const data = {
         installMethod: this.installMethod,
         client: this.client.value,
@@ -141,6 +160,7 @@ export default {
         ping: this.ping ? 1 : 0,
         arch: this.arch,
         api,
+        fileName,
       };
 
       if (this.installMethod === "manual") {
@@ -154,27 +174,10 @@ export default {
             };
             this.showAgentDownload = true;
           })
-          .catch(e => {
-            let err;
-            switch (e.response.status) {
-              case 406:
-                err = "Missing 64 bit meshagent.exe. Upload it from File > Upload Mesh Agent";
-                break;
-              case 415:
-                err = "Missing 32 bit meshagent-x86.exe. Upload it from File > Upload Mesh Agent";
-                break;
-              default:
-                err = "Something went wrong";
-            }
-            this.notifyError(err, 4000);
-          });
+          .catch(e => {});
       } else if (this.installMethod === "exe") {
         this.$q.loading.show({ message: "Generating executable..." });
 
-        const fileName =
-          this.arch === "64"
-            ? `rmm-${clientStripped}-${siteStripped}-${this.agenttype}.exe`
-            : `rmm-${clientStripped}-${siteStripped}-${this.agenttype}-x86.exe`;
         this.$axios
           .post("/agents/installagent/", data, { responseType: "blob" })
           .then(r => {
@@ -187,27 +190,21 @@ export default {
             this.showDLMessage();
           })
           .catch(e => {
+            this.$q.loading.hide();
             let err;
             switch (e.response.status) {
-              case 409:
-                err = "Golang is not installed";
-                break;
-              case 412:
-                err = "Golang build failed. Check debug log for the error message";
-                break;
-              case 413:
-                err = "Golang generate failed. Check debug log for the error message";
-                break;
               case 406:
                 err = "Missing 64 bit meshagent.exe. Upload it from File > Upload Mesh Agent";
                 break;
               case 415:
                 err = "Missing 32 bit meshagent-x86.exe. Upload it from File > Upload Mesh Agent";
                 break;
+              case 403:
+                err = "You do not have permissions to perform this action";
+                break;
               default:
                 err = "Something went wrong";
             }
-            this.$q.loading.hide();
             this.notifyError(err, 4000);
           });
       } else if (this.installMethod === "powershell") {
@@ -222,20 +219,7 @@ export default {
             link.click();
             this.showDLMessage();
           })
-          .catch(e => {
-            let err;
-            switch (e.response.status) {
-              case 406:
-                err = "Missing 64 bit meshagent.exe. Upload it from File > Upload Mesh Agent";
-                break;
-              case 415:
-                err = "Missing 32 bit meshagent-x86.exe. Upload it from File > Upload Mesh Agent";
-                break;
-              default:
-                err = "Something went wrong";
-            }
-            this.notifyError(err, 4000);
-          });
+          .catch(e => {});
       }
     },
     showDLMessage() {
@@ -266,7 +250,7 @@ export default {
       return text;
     },
   },
-  created() {
+  mounted() {
     this.getClients();
   },
 };

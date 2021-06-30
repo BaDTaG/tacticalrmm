@@ -1,23 +1,34 @@
 import pyotp
-
-from django.contrib.auth import login
 from django.conf import settings
-from django.shortcuts import get_object_or_404
+from django.contrib.auth import login
 from django.db import IntegrityError
-
-from rest_framework.views import APIView
-from rest_framework.authtoken.serializers import AuthTokenSerializer
+from django.shortcuts import get_object_or_404
 from knox.views import LoginView as KnoxLoginView
-from rest_framework.permissions import AllowAny
-from rest_framework.response import Response
 from rest_framework import status
+from rest_framework.authtoken.serializers import AuthTokenSerializer
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
-from .models import User
-from agents.models import Agent
 from logs.models import AuditLog
 from tacticalrmm.utils import notify_error
 
-from .serializers import UserSerializer, TOTPSetupSerializer
+from .models import User, Role
+from .permissions import AccountsPerms, RolesPerms
+from .serializers import (
+    TOTPSetupSerializer,
+    UserSerializer,
+    UserUISerializer,
+    RoleSerializer,
+)
+
+
+def _is_root_user(request, user) -> bool:
+    return (
+        hasattr(settings, "ROOT_USER")
+        and request.user != user
+        and user.username == settings.ROOT_USER
+    )
 
 
 class CheckCreds(KnoxLoginView):
@@ -60,7 +71,7 @@ class LoginView(KnoxLoginView):
 
         if settings.DEBUG and token == "sekret":
             valid = True
-        elif totp.verify(token, valid_window=1):
+        elif totp.verify(token, valid_window=10):
             valid = True
 
         if valid:
@@ -73,15 +84,17 @@ class LoginView(KnoxLoginView):
 
 
 class GetAddUsers(APIView):
+    permission_classes = [IsAuthenticated, AccountsPerms]
+
     def get(self, request):
-        users = User.objects.filter(agent=None)
+        users = User.objects.filter(agent=None, is_installer_user=False)
 
         return Response(UserSerializer(users, many=True).data)
 
     def post(self, request):
         # add new user
         try:
-            user = User.objects.create_user(
+            user = User.objects.create_user(  # type: ignore
                 request.data["username"],
                 request.data["email"],
                 request.data["password"],
@@ -93,13 +106,17 @@ class GetAddUsers(APIView):
 
         user.first_name = request.data["first_name"]
         user.last_name = request.data["last_name"]
-        # Can be changed once permissions and groups are introduced
-        user.is_superuser = True
+        if "role" in request.data.keys() and isinstance(request.data["role"], int):
+            role = get_object_or_404(Role, pk=request.data["role"])
+            user.role = role
+
         user.save()
         return Response(user.username)
 
 
 class GetUpdateDeleteUser(APIView):
+    permission_classes = [IsAuthenticated, AccountsPerms]
+
     def get(self, request, pk):
         user = get_object_or_404(User, pk=pk)
 
@@ -108,6 +125,9 @@ class GetUpdateDeleteUser(APIView):
     def put(self, request, pk):
         user = get_object_or_404(User, pk=pk)
 
+        if _is_root_user(request, user):
+            return notify_error("The root user cannot be modified from the UI")
+
         serializer = UserSerializer(instance=user, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
@@ -115,17 +135,23 @@ class GetUpdateDeleteUser(APIView):
         return Response("ok")
 
     def delete(self, request, pk):
-        get_object_or_404(User, pk=pk).delete()
+        user = get_object_or_404(User, pk=pk)
+        if _is_root_user(request, user):
+            return notify_error("The root user cannot be deleted from the UI")
+
+        user.delete()
 
         return Response("ok")
 
 
 class UserActions(APIView):
-
+    permission_classes = [IsAuthenticated, AccountsPerms]
     # reset password
     def post(self, request):
-
         user = get_object_or_404(User, pk=request.data["id"])
+        if _is_root_user(request, user):
+            return notify_error("The root user cannot be modified from the UI")
+
         user.set_password(request.data["password"])
         user.save()
 
@@ -133,8 +159,10 @@ class UserActions(APIView):
 
     # reset two factor token
     def put(self, request):
-
         user = get_object_or_404(User, pk=request.data["id"])
+        if _is_root_user(request, user):
+            return notify_error("The root user cannot be modified from the UI")
+
         user.totp_key = ""
         user.save()
 
@@ -160,7 +188,48 @@ class TOTPSetup(APIView):
 
 class UserUI(APIView):
     def patch(self, request):
-        user = request.user
-        user.dark_mode = request.data["dark_mode"]
-        user.save(update_fields=["dark_mode"])
+        serializer = UserUISerializer(
+            instance=request.user, data=request.data, partial=True
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response("ok")
+
+
+class PermsList(APIView):
+    def get(self, request):
+        return Response(Role.perms())
+
+
+class GetAddRoles(APIView):
+    permission_classes = [IsAuthenticated, RolesPerms]
+
+    def get(self, request):
+        roles = Role.objects.all()
+        return Response(RoleSerializer(roles, many=True).data)
+
+    def post(self, request):
+        serializer = RoleSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response("ok")
+
+
+class GetUpdateDeleteRole(APIView):
+    permission_classes = [IsAuthenticated, RolesPerms]
+
+    def get(self, request, pk):
+        role = get_object_or_404(Role, pk=pk)
+        return Response(RoleSerializer(role).data)
+
+    def put(self, request, pk):
+        role = get_object_or_404(Role, pk=pk)
+        serializer = RoleSerializer(instance=role, data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response("ok")
+
+    def delete(self, request, pk):
+        role = get_object_or_404(Role, pk=pk)
+        role.delete()
         return Response("ok")

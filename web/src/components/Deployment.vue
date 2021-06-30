@@ -5,7 +5,7 @@
       <q-space />Manage Deployments
       <q-space />
       <q-btn dense flat icon="close" v-close-popup>
-        <q-tooltip content-class="bg-white text-primary" />
+        <q-tooltip class="bg-white text-primary" />
       </q-btn>
     </q-bar>
     <div class="row">
@@ -21,14 +21,14 @@
         class="audit-mgr-tbl-sticky"
         binary-state-sort
         virtual-scroll
-        :data="deployments"
+        :rows="deployments"
         :columns="columns"
         :visible-columns="visibleColumns"
         row-key="id"
-        :pagination.sync="pagination"
+        v-model:pagination="pagination"
         no-data-label="No Deployments"
       >
-        <template slot="body" slot-scope="props" :props="props">
+        <template v-slot:body="props">
           <q-tr>
             <q-td key="client" :props="props">{{ props.row.client_name }}</q-td>
             <q-td key="site" :props="props">{{ props.row.site_name }}</q-td>
@@ -37,9 +37,10 @@
               ><span v-if="props.row.arch === '64'">64 bit</span><span v-else>32 bit</span></q-td
             >
             <q-td key="expiry" :props="props">{{ props.row.expiry }}</q-td>
+            <q-td key="created" :props="props">{{ props.row.created }}</q-td>
             <q-td key="flags" :props="props"
               ><q-badge color="grey-8" label="View Flags" />
-              <q-tooltip content-style="font-size: 12px">{{ props.row.install_flags }}</q-tooltip>
+              <q-tooltip style="font-size: 12px">{{ props.row.install_flags }}</q-tooltip>
             </q-td>
             <q-td key="link" :props="props"
               ><q-btn size="sm" color="primary" icon="content_copy" label="Copy" @click="copyLink(props)"
@@ -52,13 +53,12 @@
       </q-table>
     </q-card-section>
     <q-dialog v-model="showNewDeployment">
-      <NewDeployment @close="showNewDeployment = false" @added="getDeployments" />
+      <NewDeployment @close="showNewDeployment = false" @add="getDeployments" />
     </q-dialog>
   </q-card>
 </template>
 
 <script>
-import axios from "axios";
 import mixins from "@/mixins/mixins";
 import NewDeployment from "@/components/modals/clients/NewDeployment";
 import { copyToClipboard } from "quasar";
@@ -82,11 +82,12 @@ export default {
         { name: "mon_type", label: "Type", field: "mon_type", align: "left", sortable: true },
         { name: "arch", label: "Arch", field: "arch", align: "left", sortable: true },
         { name: "expiry", label: "Expiry", field: "expiry", align: "left", sortable: true },
+        { name: "created", label: "Created", field: "created", align: "left", sortable: true },
         { name: "flags", label: "Flags", field: "install_flags", align: "left" },
         { name: "link", label: "Download Link", align: "left" },
         { name: "delete", label: "Delete", align: "left" },
       ],
-      visibleColumns: ["client", "site", "mon_type", "arch", "expiry", "flags", "link", "delete"],
+      visibleColumns: ["client", "site", "mon_type", "arch", "expiry", "created", "flags", "link", "delete"],
 
       pagination: {
         rowsPerPage: 50,
@@ -97,9 +98,12 @@ export default {
   },
   methods: {
     getDeployments() {
-      this.$axios.get("/clients/deployments/").then(r => {
-        this.deployments = r.data;
-      });
+      this.$axios
+        .get("/clients/deployments/")
+        .then(r => {
+          this.deployments = r.data;
+        })
+        .catch(e => {});
     },
     deleteDeployment(pk) {
       this.$q
@@ -115,7 +119,7 @@ export default {
               this.getDeployments();
               this.notifySuccess("Deployment deleted");
             })
-            .catch(() => this.notifyError("Something went wrong"));
+            .catch(e => {});
         });
     },
     copyLink(props) {
@@ -125,7 +129,7 @@ export default {
       });
     },
   },
-  created() {
+  mounted() {
     this.getDeployments();
   },
 };

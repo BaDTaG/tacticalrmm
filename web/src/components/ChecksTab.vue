@@ -60,11 +60,11 @@
           :table-class="{ 'table-bgcolor': !$q.dark.isActive, 'table-bgcolor-dark': $q.dark.isActive }"
           class="tabs-tbl-sticky"
           :style="{ 'max-height': tabsTableHeight }"
-          :data="checks"
+          :rows="checks"
           :columns="columns"
           :row-key="row => row.id + row.check_type"
           binary-state-sort
-          :pagination.sync="pagination"
+          v-model:pagination="pagination"
           hide-bottom
         >
           <!-- header slots -->
@@ -82,6 +82,13 @@
               </q-icon>
             </q-th>
           </template>
+          <template v-slot:header-cell-dashboardalert="props">
+            <q-th auto-width :props="props">
+              <q-icon name="notifications" size="1.5em">
+                <q-tooltip>Dashboard Alert</q-tooltip>
+              </q-icon>
+            </q-th>
+          </template>
           <template v-slot:header-cell-statusicon="props">
             <q-th auto-width :props="props"></q-th>
           </template>
@@ -89,7 +96,7 @@
             <q-th auto-width :props="props"></q-th>
           </template>
           <!-- body slots -->
-          <template slot="body" slot-scope="props" :props="props">
+          <template v-slot:body="props">
             <q-tr @contextmenu="checkpk = props.row.id">
               <!-- context menu -->
               <q-menu context-menu>
@@ -117,6 +124,13 @@
                     <q-item-section>Delete</q-item-section>
                   </q-item>
                   <q-separator></q-separator>
+                  <q-item clickable v-close-popup @click="resetCheck(props.row.id)">
+                    <q-item-section side>
+                      <q-icon name="info" />
+                    </q-item-section>
+                    <q-item-section>Reset Check Status</q-item-section>
+                  </q-item>
+                  <q-separator></q-separator>
                   <q-item clickable v-close-popup>
                     <q-item-section>Close</q-item-section>
                   </q-item>
@@ -126,19 +140,64 @@
               <!-- text alert -->
               <q-td>
                 <q-checkbox
+                  v-if="props.row.alert_template && props.row.alert_template.always_text !== null"
+                  :value="props.row.alert_template.always_text"
+                  disable
                   dense
-                  @input="checkAlert(props.row.id, 'Text', props.row.text_alert, props.row.managed_by_policy)"
+                >
+                  <q-tooltip> Setting is overidden by alert template: {{ props.row.alert_template.name }} </q-tooltip>
+                </q-checkbox>
+
+                <q-checkbox
+                  v-else
+                  dense
+                  @update:model-value="
+                    checkAlert(props.row.id, 'Text', props.row.text_alert, props.row.managed_by_policy)
+                  "
                   v-model="props.row.text_alert"
-                  :disabled="props.row.managed_by_policy"
+                  :disable="props.row.managed_by_policy"
                 />
               </q-td>
               <!-- email alert -->
               <q-td>
                 <q-checkbox
+                  v-if="props.row.alert_template && props.row.alert_template.always_email !== null"
+                  :value="props.row.alert_template.always_email"
+                  disable
                   dense
-                  @input="checkAlert(props.row.id, 'Email', props.row.email_alert, props.row.managed_by_policy)"
+                >
+                  <q-tooltip> Setting is overidden by alert template: {{ props.row.alert_template.name }} </q-tooltip>
+                </q-checkbox>
+
+                <q-checkbox
+                  v-else
+                  dense
+                  @update:model-value="
+                    checkAlert(props.row.id, 'Email', props.row.email_alert, props.row.managed_by_policy)
+                  "
                   v-model="props.row.email_alert"
-                  :disabled="props.row.managed_by_policy"
+                  :disable="props.row.managed_by_policy"
+                />
+              </q-td>
+              <!-- dashboard alert -->
+              <q-td>
+                <q-checkbox
+                  v-if="props.row.alert_template && props.row.alert_template.always_alert !== null"
+                  :value="props.row.alert_template.always_alert"
+                  disable
+                  dense
+                >
+                  <q-tooltip> Setting is overidden by alert template: {{ props.row.alert_template.name }} </q-tooltip>
+                </q-checkbox>
+
+                <q-checkbox
+                  v-else
+                  dense
+                  @update:model-value="
+                    checkAlert(props.row.id, 'Dashboard', props.row.dashboard_alert, props.row.managed_by_policy)
+                  "
+                  v-model="props.row.dashboard_alert"
+                  :disable="props.row.managed_by_policy"
                 />
               </q-td>
               <!-- policy check icon -->
@@ -154,53 +213,65 @@
               </q-td>
               <q-td v-else></q-td>
               <!-- status icon -->
-              <q-td v-if="props.row.status === 'pending'"></q-td>
-              <q-td v-else-if="props.row.status === 'passing'">
-                <q-icon style="font-size: 1.3rem" color="positive" name="check_circle" />
+              <q-td v-if="props.row.status === 'passing'">
+                <q-icon style="font-size: 1.3rem" color="positive" name="check_circle">
+                  <q-tooltip>Passing</q-tooltip>
+                </q-icon>
               </q-td>
               <q-td v-else-if="props.row.status === 'failing'">
-                <q-icon style="font-size: 1.3rem" color="negative" name="error" />
+                <q-icon v-if="props.row.alert_severity === 'info'" style="font-size: 1.3rem" color="info" name="info">
+                  <q-tooltip>Informational</q-tooltip>
+                </q-icon>
+                <q-icon
+                  v-else-if="props.row.alert_severity === 'warning'"
+                  style="font-size: 1.3rem"
+                  color="warning"
+                  name="warning"
+                >
+                  <q-tooltip>Warning</q-tooltip>
+                </q-icon>
+                <q-icon v-else style="font-size: 1.3rem" color="negative" name="error">
+                  <q-tooltip>Error</q-tooltip>
+                </q-icon>
               </q-td>
+              <q-td v-else></q-td>
               <!-- check description -->
               <q-td>{{ props.row.readable_desc }}</q-td>
-              <!-- status text -->
-              <q-td v-if="props.row.status === 'pending'">Awaiting First Synchronization</q-td>
-              <q-td v-else-if="props.row.status === 'passing'">
-                <q-badge color="positive">Passing</q-badge>
-              </q-td>
-              <q-td v-else-if="props.row.status === 'failing'">
-                <q-badge color="negative">Failing</q-badge>
-              </q-td>
               <!-- more info -->
-              <q-td v-if="props.row.check_type === 'ping'">
+              <q-td>
                 <span
+                  style="cursor: pointer; text-decoration: underline"
+                  class="text-primary"
+                  @click="showCheckGraphModal(props.row)"
+                  >Show Run History</span
+                >
+                &nbsp;&nbsp;&nbsp;
+                <span
+                  v-if="props.row.check_type === 'ping'"
                   style="cursor: pointer; text-decoration: underline"
                   class="text-primary"
                   @click="pingInfo(props.row.readable_desc, props.row.more_info)"
-                  >output</span
+                  >Last Output</span
                 >
-              </q-td>
-              <q-td v-else-if="props.row.check_type === 'script'">
                 <span
+                  v-else-if="props.row.check_type === 'script'"
                   style="cursor: pointer; text-decoration: underline"
                   class="text-primary"
-                  @click="scriptMoreInfo(props.row)"
-                  >output</span
+                  @click="showScriptOutput(props.row)"
+                  >Last Output</span
                 >
-              </q-td>
-              <q-td v-else-if="props.row.check_type === 'eventlog'">
                 <span
+                  v-else-if="props.row.check_type === 'eventlog'"
                   style="cursor: pointer; text-decoration: underline"
                   class="text-primary"
                   @click="eventLogMoreInfo(props.row)"
-                  >output</span
+                  >Last Output</span
                 >
+                <span v-else-if="props.row.check_type === 'diskspace' || props.row.check_type === 'winsvc'">{{
+                  props.row.more_info
+                }}</span>
               </q-td>
-              <q-td v-else-if="props.row.check_type === 'cpuload' || props.row.check_type === 'memory'">{{
-                props.row.history_info
-              }}</q-td>
-              <q-td v-else>{{ props.row.more_info }}</q-td>
-              <q-td>{{ props.row.last_run }}</q-td>
+              <q-td>{{ props.row.last_run || "Never" }}</q-td>
               <q-td v-if="props.row.assigned_task !== null && props.row.assigned_task.length > 1"
                 >{{ props.row.assigned_task.length }} Tasks</q-td
               >
@@ -233,15 +304,6 @@
     <q-dialog v-model="showScriptCheck">
       <ScriptCheck @close="showScriptCheck = false" :agentpk="selectedAgentPk" :mode="mode" :checkpk="checkpk" />
     </q-dialog>
-    <q-dialog v-model="showScriptOutput">
-      <ScriptOutput
-        @close="
-          showScriptOutput = false;
-          scriptInfo = {};
-        "
-        :scriptInfo="scriptInfo"
-      />
-    </q-dialog>
     <q-dialog v-model="showEventLogOutput">
       <EventLogCheckOutput
         @close="
@@ -255,8 +317,7 @@
 </template>
 
 <script>
-import axios from "axios";
-import { mapState, mapGetters } from "vuex";
+import { mapGetters } from "vuex";
 import mixins from "@/mixins/mixins";
 import DiskSpaceCheck from "@/components/modals/checks/DiskSpaceCheck";
 import MemCheck from "@/components/modals/checks/MemCheck";
@@ -267,9 +328,11 @@ import EventLogCheck from "@/components/modals/checks/EventLogCheck";
 import ScriptCheck from "@/components/modals/checks/ScriptCheck";
 import ScriptOutput from "@/components/modals/checks/ScriptOutput";
 import EventLogCheckOutput from "@/components/modals/checks/EventLogCheckOutput";
+import CheckGraph from "@/components/graphs/CheckGraph";
 
 export default {
   name: "ChecksTab",
+  emits: ["edit"],
   components: {
     DiskSpaceCheck,
     MemCheck,
@@ -278,7 +341,6 @@ export default {
     WinSvcCheck,
     EventLogCheck,
     ScriptCheck,
-    ScriptOutput,
     EventLogCheckOutput,
   },
   mixins: [mixins],
@@ -293,17 +355,15 @@ export default {
       showWinSvcCheck: false,
       showEventLogCheck: false,
       showScriptCheck: false,
-      showScriptOutput: false,
       showEventLogOutput: false,
-      scriptInfo: {},
       evtlogdata: {},
       columns: [
         { name: "smsalert", field: "text_alert", align: "left" },
         { name: "emailalert", field: "email_alert", align: "left" },
+        { name: "dashboardalert", field: "dashboard_alert", align: "left" },
         { name: "policystatus", align: "left" },
         { name: "statusicon", align: "left" },
         { name: "desc", field: "readable_desc", label: "Description", align: "left", sortable: true },
-        { name: "status", label: "Status", field: "status", align: "left", sortable: true },
         {
           name: "moreinfo",
           label: "More Info",
@@ -369,22 +429,44 @@ export default {
 
       const data = {};
       if (alert_type === "Email") {
-        data.email_alert = action;
+        data.email_alert = !action;
+      } else if (alert_type === "Text") {
+        data.text_alert = !action;
       } else {
-        data.text_alert = action;
+        data.dashboard_alert = !action;
       }
+
       data.check_alert = true;
-      const act = action ? "enabled" : "disabled";
-      const color = action ? "positive" : "warning";
-      axios.patch(`/checks/${id}/check/`, data).then(r => {
-        this.$q.notify({
-          color: color,
-          icon: "fas fa-check-circle",
-          message: `${alert_type} alerts ${act}`,
-        });
-      });
+      const act = !action ? "enabled" : "disabled";
+      const color = !action ? "positive" : "warning";
+      this.$axios
+        .patch(`/checks/${id}/check/`, data)
+        .then(r => {
+          this.$q.notify({
+            color: color,
+            icon: "fas fa-check-circle",
+            message: `${alert_type} alerts ${act}`,
+          });
+        })
+        .catch(e => {});
+    },
+    resetCheck(check) {
+      const data = {
+        check_reset: true,
+        status: "passing",
+      };
+
+      this.$axios
+        .patch(`/checks/${check}/check/`, data)
+        .then(r => {
+          this.$emit("edit");
+          this.$store.dispatch("loadChecks", this.selectedAgentPk);
+          this.notifySuccess("The check was reset");
+        })
+        .catch(e => {});
     },
     onRefresh(id) {
+      this.$emit("edit");
       this.$store.dispatch("loadChecks", id);
       this.$store.dispatch("loadAutomatedTasks", id);
     },
@@ -395,10 +477,6 @@ export default {
         message: `<pre>${output}</pre>`,
         html: true,
       });
-    },
-    scriptMoreInfo(props) {
-      this.scriptInfo = props;
-      this.showScriptOutput = true;
     },
     eventLogMoreInfo(props) {
       this.evtlogdata = props;
@@ -414,15 +492,31 @@ export default {
           persistent: true,
         })
         .onOk(() => {
-          axios
+          this.$axios
             .delete(`/checks/${pk}/check/`)
             .then(r => {
               this.$store.dispatch("loadChecks", this.selectedAgentPk);
               this.$store.dispatch("loadAutomatedTasks", this.selectedAgentPk);
               this.notifySuccess(r.data);
             })
-            .catch(e => this.notifyError(e.response.data));
+            .catch(e => {});
         });
+    },
+    showCheckGraphModal(check) {
+      this.$q.dialog({
+        component: CheckGraph,
+        componentProps: {
+          check: check,
+        },
+      });
+    },
+    showScriptOutput(script) {
+      this.$q.dialog({
+        component: ScriptOutput,
+        componentProps: {
+          scriptInfo: script,
+        },
+      });
     },
   },
   computed: {

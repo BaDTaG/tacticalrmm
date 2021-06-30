@@ -1,7 +1,9 @@
 #!/bin/bash
 
-SCRIPT_VERSION="23"
+SCRIPT_VERSION="51"
 SCRIPT_URL='https://raw.githubusercontent.com/wh1te909/tacticalrmm/master/install.sh'
+
+sudo apt install -y curl wget dirmngr gnupg lsb-release
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -23,14 +25,32 @@ fi
 
 rm -f $TMP_FILE
 
-UBU20=$(grep 20.04 "/etc/"*"release")
-if ! [[ $UBU20 ]]; then
-  echo -ne "\033[0;31mThis script will only work on Ubuntu 20.04\e[0m\n"
-  exit 1
+osname=$(lsb_release -si); osname=${osname^}
+osname=$(echo "$osname" | tr  '[A-Z]' '[a-z]')
+fullrel=$(lsb_release -sd)
+codename=$(lsb_release -sc)
+relno=$(lsb_release -sr | cut -d. -f1)
+fullrelno=$(lsb_release -sr)
+
+# Fallback if lsb_release -si returns anything else than Ubuntu, Debian or Raspbian
+if [ ! "$osname" = "ubuntu" ] && [ ! "$osname" = "debian" ]; then
+  osname=$(grep -oP '(?<=^ID=).+' /etc/os-release | tr -d '"')
+  osname=${osname^}
+fi
+
+
+# determine system
+if ([ "$osname" = "ubuntu" ] && [ "$fullrelno" = "20.04" ]) || ([ "$osname" = "debian" ] && [ $relno -ge 10 ]); then
+  echo $fullrel
+else
+ echo $fullrel
+ echo -ne "${RED}Only Ubuntu release 20.04 and Debian 10 and later, are supported\n"
+ echo -ne "Your system does not appear to be supported${NC}\n"
+ exit 1
 fi
 
 if [ $EUID -eq 0 ]; then
-  echo -ne "\033[0;31mDo NOT run this script as root. Exiting.\e[0m\n"
+  echo -ne "${RED}Do NOT run this script as root. Exiting.${NC}\n"
   exit 1
 fi
 
@@ -42,15 +62,25 @@ if [[ "$LANG" != *".UTF-8" ]]; then
   exit 1
 fi
 
+if ([ "$osname" = "ubuntu" ]); then
+  mongodb_repo="deb [arch=amd64] https://repo.mongodb.org/apt/$osname $codename/mongodb-org/4.4 multiverse"
+else
+  mongodb_repo="deb [arch=amd64] https://repo.mongodb.org/apt/$osname $codename/mongodb-org/4.4 main"
+
+fi
+
+postgresql_repo="deb [arch=amd64] https://apt.postgresql.org/pub/repos/apt/ $codename-pgdg main"
+
+
 # prevents logging issues with some VPS providers like Vultr if this is a freshly provisioned instance that hasn't been rebooted yet
 sudo systemctl restart systemd-journald.service
 
 DJANGO_SEKRET=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 80 | head -n 1)
-SALTPW=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 20 | head -n 1)
 ADMINURL=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 70 | head -n 1)
 MESHPASSWD=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 25 | head -n 1)
 pgusername=$(cat /dev/urandom | tr -dc 'a-z' | fold -w 8 | head -n 1)
 pgpw=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 20 | head -n 1)
+meshusername=$(cat /dev/urandom | tr -dc 'a-z' | fold -w 8 | head -n 1)
 
 cls() {
   printf "\033c"
@@ -93,7 +123,7 @@ echo -ne "${YELLOW}Enter a valid email address for django and meshcentral${NC}: 
 read letsemail
 done
 
-# if server is behind NAT we need to add the 3 subdomains to the host file 
+# if server is behind NAT we need to add the 3 subdomains to the host file
 # so that nginx can properly route between the frontend, backend and meshcentral
 # EDIT 8-29-2020
 # running this even if server is __not__ behind NAT just to make DNS resolving faster
@@ -102,39 +132,19 @@ CHECK_HOSTS=$(grep 127.0.1.1 /etc/hosts | grep "$rmmdomain" | grep "$meshdomain"
 HAS_11=$(grep 127.0.1.1 /etc/hosts)
 
 if ! [[ $CHECK_HOSTS ]]; then
-    echo -ne "${GREEN}We need to append your 3 subdomains to the line starting with 127.0.1.1 in your hosts file.${NC}\n"
-    until [[ $edithosts =~ (y|n) ]]; do
-        echo -ne "${GREEN}Would you like me to do this for you? [y/n]${NC}: "
-        read edithosts
-    done
-
-    if [[ $edithosts == "y" ]]; then
-        if [[ $HAS_11 ]]; then
-          sudo sed -i "/127.0.1.1/s/$/ ${rmmdomain} $frontenddomain $meshdomain/" /etc/hosts
-        else
-          echo "127.0.1.1 ${rmmdomain} $frontenddomain $meshdomain" | sudo tee --append /etc/hosts > /dev/null
-        fi
-    else 
-        if [[ $HAS_11 ]]; then
-          echo -ne "${GREEN}Please manually edit your /etc/hosts file to match the line below and re-run this script.${NC}\n"
-          sed "/127.0.1.1/s/$/ ${rmmdomain} $frontenddomain $meshdomain/" /etc/hosts | grep 127.0.1.1
-        else
-          echo -ne "\n${GREEN}Append the following line to your /etc/hosts file${NC}\n"
-          echo "127.0.1.1 ${rmmdomain} $frontenddomain $meshdomain"
-        fi
-        exit 1
-    fi
+  print_green 'Adding subdomains to hosts file'
+  if [[ $HAS_11 ]]; then
+    sudo sed -i "/127.0.1.1/s/$/ ${rmmdomain} ${frontenddomain} ${meshdomain}/" /etc/hosts
+  else
+    echo "127.0.1.1 ${rmmdomain} ${frontenddomain} ${meshdomain}" | sudo tee --append /etc/hosts > /dev/null
+  fi
 fi
-
 
 BEHIND_NAT=false
 IPV4=$(ip -4 addr | sed -ne 's|^.* inet \([^/]*\)/.* scope global.*$|\1|p' | head -1)
 if echo "$IPV4" | grep -qE '^(10\.|172\.1[6789]\.|172\.2[0-9]\.|172\.3[01]\.|192\.168)'; then
-    BEHIND_NAT=true 
+    BEHIND_NAT=true
 fi
-
-echo -ne "${YELLOW}Create a username for meshcentral${NC}: "
-read meshusername
 
 sudo apt install -y software-properties-common
 sudo apt update
@@ -145,7 +155,7 @@ print_green 'Getting wildcard cert'
 sudo certbot certonly --manual -d *.${rootdomain} --agree-tos --no-bootstrap --manual-public-ip-logging-ok --preferred-challenges dns -m ${letsemail} --no-eff-email
 while [[ $? -ne 0 ]]
 do
-sudo certbot certonly --manual -d *.${rootdomain} --agree-tos --no-bootstrap --manual-public-ip-logging-ok --preferred-challenges dns -m ${letsemail} --no-eff-email
+sudo certbot certonly --manual -d *.${rootdomain} --agree-tos --no-bootstrap --manual-public-ip-logging-ok --preferred-challenges dns -m ${letsemail} --no-eff-email 
 done
 
 CERT_PRIV_KEY=/etc/letsencrypt/live/${rootdomain}/privkey.pem
@@ -154,32 +164,14 @@ CERT_PUB_KEY=/etc/letsencrypt/live/${rootdomain}/fullchain.pem
 sudo chown ${USER}:${USER} -R /etc/letsencrypt
 sudo chmod 775 -R /etc/letsencrypt
 
-print_green 'Creating saltapi user'
-
-sudo adduser --no-create-home --disabled-password --gecos "" saltapi
-echo "saltapi:${SALTPW}" | sudo chpasswd
-
-print_green 'Installing golang'
-
-sudo apt install -y curl wget
-
-sudo mkdir -p /usr/local/rmmgo
-go_tmp=$(mktemp -d -t rmmgo-XXXXXXXXXX)
-wget https://golang.org/dl/go1.15.5.linux-amd64.tar.gz -P ${go_tmp}
-
-tar -xzf ${go_tmp}/go1.15.5.linux-amd64.tar.gz -C ${go_tmp}
-
-sudo mv ${go_tmp}/go /usr/local/rmmgo/
-rm -rf ${go_tmp}
-
 print_green 'Downloading NATS'
 
 nats_tmp=$(mktemp -d -t nats-XXXXXXXXXX)
-wget https://github.com/nats-io/nats-server/releases/download/v2.1.9/nats-server-v2.1.9-linux-amd64.tar.gz -P ${nats_tmp}
+wget https://github.com/nats-io/nats-server/releases/download/v2.2.6/nats-server-v2.2.6-linux-amd64.tar.gz -P ${nats_tmp}
 
-tar -xzf ${nats_tmp}/nats-server-v2.1.9-linux-amd64.tar.gz -C ${nats_tmp}
+tar -xzf ${nats_tmp}/nats-server-v2.2.6-linux-amd64.tar.gz -C ${nats_tmp}
 
-sudo mv ${nats_tmp}/nats-server-v2.1.9-linux-amd64/nats-server /usr/local/bin/
+sudo mv ${nats_tmp}/nats-server-v2.2.6-linux-amd64/nats-server /usr/local/bin/
 sudo chmod +x /usr/local/bin/nats-server
 sudo chown ${USER}:${USER} /usr/local/bin/nats-server
 rm -rf ${nats_tmp}
@@ -188,82 +180,58 @@ print_green 'Installing Nginx'
 
 sudo apt install -y nginx
 sudo systemctl stop nginx
+sudo sed -i 's/worker_connections.*/worker_connections 2048;/g' /etc/nginx/nginx.conf
 
 print_green 'Installing NodeJS'
 
-curl -sL https://deb.nodesource.com/setup_12.x | sudo -E bash -
+curl -sL https://deb.nodesource.com/setup_14.x | sudo -E bash -
 sudo apt update
 sudo apt install -y gcc g++ make
 sudo apt install -y nodejs
+sudo npm install -g npm
 
 print_green 'Installing MongoDB'
 
-wget -qO - https://www.mongodb.org/static/pgp/server-4.2.asc | sudo apt-key add -
-echo "deb [ arch=amd64 ] https://repo.mongodb.org/apt/ubuntu bionic/mongodb-org/4.2 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-4.2.list
+wget -qO - https://www.mongodb.org/static/pgp/server-4.4.asc | sudo apt-key add -
+echo "$mongodb_repo" | sudo tee /etc/apt/sources.list.d/mongodb-org-4.4.list
 sudo apt update
 sudo apt install -y mongodb-org
 sudo systemctl enable mongod
 sudo systemctl restart mongod
 
-print_green 'Installing MeshCentral'
+print_green 'Installing Python 3.9'
 
-sudo mkdir -p /meshcentral/meshcentral-data
-sudo chown ${USER}:${USER} -R /meshcentral
-cd /meshcentral
-npm install meshcentral@0.6.84
-sudo chown ${USER}:${USER} -R /meshcentral
+sudo apt install -y build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev libsqlite3-dev libbz2-dev
+numprocs=$(nproc)
+cd ~
+wget https://www.python.org/ftp/python/3.9.2/Python-3.9.2.tgz
+tar -xf Python-3.9.2.tgz
+cd Python-3.9.2
+./configure --enable-optimizations
+make -j $numprocs
+sudo make altinstall
+cd ~
+sudo rm -rf Python-3.9.2 Python-3.9.2.tgz
 
-meshcfg="$(cat << EOF
-{
-  "settings": {
-    "Cert": "${meshdomain}",
-    "MongoDb": "mongodb://127.0.0.1:27017",
-    "MongoDbName": "meshcentral",
-    "WANonly": true,
-    "Minify": 1,
-    "Port": 4430,
-    "AliasPort": 443,
-    "RedirPort": 800,
-    "AllowLoginToken": true,
-    "AllowFraming": true,
-    "_AgentPing": 60,
-    "AgentPong": 300,
-    "AllowHighQualityDesktop": true,
-    "TlsOffload": "127.0.0.1",
-    "MaxInvalidLogin": { "time": 5, "count": 5, "coolofftime": 30 }
-  },
-  "domains": {
-    "": {
-      "Title": "Tactical RMM",
-      "Title2": "Tactical RMM",
-      "NewAccounts": false,
-      "CertUrl": "https://${meshdomain}:443/",
-      "GeoLocation": true,
-      "CookieIpCheck": false,
-      "mstsc": true,
-      "httpheaders": {
-        "Strict-Transport-Security": "max-age=360000",
-        "_x-frame-options": "sameorigin",
-        "Content-Security-Policy": "default-src 'none'; script-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-src 'self'; media-src 'self'"
-      }
-    }
-  }
-}
-EOF
-)"
-echo "${meshcfg}" > /meshcentral/meshcentral-data/config.json
 
-print_green 'Installing python, redis and git'
+print_green 'Installing redis and git'
+sudo apt install -y ca-certificates redis git
 
-sudo apt update
-sudo apt install -y python3.8-venv python3.8-dev python3-pip python3-cherrypy3 python3-setuptools python3-wheel ca-certificates redis git
+# apply redis configuration
+sudo redis-cli config set appendonly yes
+sudo redis-cli config rewrite
 
 print_green 'Installing postgresql'
 
-sudo sh -c 'echo "deb https://apt.postgresql.org/pub/repos/apt/ $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+echo "$postgresql_repo" | sudo tee /etc/apt/sources.list.d/pgdg.list
+
 wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
 sudo apt update
 sudo apt install -y postgresql-13
+sleep 2
+sudo systemctl enable postgresql
+sudo systemctl restart postgresql
+sleep 5
 
 print_green 'Creating database for the rmm'
 
@@ -283,6 +251,55 @@ cd /rmm
 git config user.email "admin@example.com"
 git config user.name "Bob"
 git checkout master
+
+print_green 'Installing MeshCentral'
+
+MESH_VER=$(grep "^MESH_VER" /rmm/api/tacticalrmm/tacticalrmm/settings.py | awk -F'[= "]' '{print $5}')
+
+sudo mkdir -p /meshcentral/meshcentral-data
+sudo chown ${USER}:${USER} -R /meshcentral
+cd /meshcentral
+npm install meshcentral@${MESH_VER}
+sudo chown ${USER}:${USER} -R /meshcentral
+
+meshcfg="$(cat << EOF
+{
+  "settings": {
+    "Cert": "${meshdomain}",
+    "MongoDb": "mongodb://127.0.0.1:27017",
+    "MongoDbName": "meshcentral",
+    "WANonly": true,
+    "Minify": 1,
+    "Port": 4430,
+    "AliasPort": 443,
+    "RedirPort": 800,
+    "AllowLoginToken": true,
+    "AllowFraming": true,
+    "_AgentPing": 60,
+    "AgentPong": 300,
+    "AllowHighQualityDesktop": true,
+    "TlsOffload": "127.0.0.1",
+    "agentCoreDump": false,
+    "Compression": true,
+    "WsCompression": true,
+    "AgentWsCompression": true,
+    "MaxInvalidLogin": { "time": 5, "count": 5, "coolofftime": 30 }
+  },
+  "domains": {
+    "": {
+      "Title": "Tactical RMM",
+      "Title2": "Tactical RMM",
+      "NewAccounts": false,
+      "CertUrl": "https://${meshdomain}:443/",
+      "GeoLocation": true,
+      "CookieIpCheck": false,
+      "mstsc": true
+    }
+  }
+}
+EOF
+)"
+echo "${meshcfg}" > /meshcentral/meshcentral-data/config.json
 
 localvars="$(cat << EOF
 SECRET_KEY = "${DJANGO_SEKRET}"
@@ -326,29 +343,30 @@ if not DEBUG:
         )
     })
 
-SALT_USERNAME = "saltapi"
-SALT_PASSWORD = "${SALTPW}"
-SALT_HOST     = "127.0.0.1"
 MESH_USERNAME = "${meshusername}"
 MESH_SITE = "https://${meshdomain}"
 REDIS_HOST    = "localhost"
+KEEP_SALT = False
+ADMIN_ENABLED = True
 EOF
 )"
 echo "${localvars}" > /rmm/api/tacticalrmm/tacticalrmm/local_settings.py
 
-/usr/local/rmmgo/go/bin/go get github.com/josephspurrier/goversioninfo/cmd/goversioninfo
-sudo cp /rmm/api/tacticalrmm/core/goinstaller/bin/goversioninfo /usr/local/bin/
-sudo chown ${USER}:${USER} /usr/local/bin/goversioninfo
-sudo chmod +x /usr/local/bin/goversioninfo
+sudo cp /rmm/natsapi/bin/nats-api /usr/local/bin
+sudo chown ${USER}:${USER} /usr/local/bin/nats-api
+sudo chmod +x /usr/local/bin/nats-api
 
 print_green 'Installing the backend'
 
+SETUPTOOLS_VER=$(grep "^SETUPTOOLS_VER" /rmm/api/tacticalrmm/tacticalrmm/settings.py | awk -F'[= "]' '{print $5}')
+WHEEL_VER=$(grep "^WHEEL_VER" /rmm/api/tacticalrmm/tacticalrmm/settings.py | awk -F'[= "]' '{print $5}')
+
 cd /rmm/api
-python3 -m venv env
+python3.9 -m venv env
 source /rmm/api/env/bin/activate
 cd /rmm/api/tacticalrmm
 pip install --no-cache-dir --upgrade pip
-pip install --no-cache-dir setuptools==49.6.0 wheel==0.35.1
+pip install --no-cache-dir setuptools==${SETUPTOOLS_VER} wheel==${WHEEL_VER}
 pip install --no-cache-dir -r /rmm/api/tacticalrmm/requirements.txt
 python manage.py migrate
 python manage.py collectstatic --no-input
@@ -362,32 +380,36 @@ printf >&2 "\n"
 echo -ne "Username: "
 read djangousername
 python manage.py createsuperuser --username ${djangousername} --email ${letsemail}
+python manage.py create_installer_user
 RANDBASE=$(python manage.py generate_totp)
 cls
 python manage.py generate_barcode ${RANDBASE} ${djangousername} ${frontenddomain}
 deactivate
 read -n 1 -s -r -p "Press any key to continue..."
 
+uwsgiprocs=4
+if [[ "$numprocs" == "1" ]]; then
+  uwsgiprocs=2
+else
+  uwsgiprocs=$numprocs
+fi
 
 uwsgini="$(cat << EOF
 [uwsgi]
-
-# logto = /rmm/api/tacticalrmm/tacticalrmm/private/log/uwsgi.log
 chdir = /rmm/api/tacticalrmm
 module = tacticalrmm.wsgi
 home = /rmm/api/env
 master = true
-processes = 6
-threads = 6
-enable-threads = True
+processes = ${uwsgiprocs}
+threads = ${uwsgiprocs}
+enable-threads = true
 socket = /rmm/api/tacticalrmm/tacticalrmm.sock
 harakiri = 300
 chmod-socket = 660
-# clear environment on exit
+buffer-size = 65535
 vacuum = true
 die-on-term = true
 max-requests = 500
-max-requests-delta = 1000
 EOF
 )"
 echo "${uwsgini}" > /rmm/api/tacticalrmm/app.ini
@@ -413,6 +435,26 @@ EOF
 )"
 echo "${rmmservice}" | sudo tee /etc/systemd/system/rmm.service > /dev/null
 
+daphneservice="$(cat << EOF
+[Unit]
+Description=django channels daemon
+After=network.target
+
+[Service]
+User=${USER}
+Group=www-data
+WorkingDirectory=/rmm/api/tacticalrmm
+Environment="PATH=/rmm/api/env/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/rmm/api/env/bin/daphne -u /rmm/daphne.sock tacticalrmm.asgi:application
+Restart=always
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+)"
+echo "${daphneservice}" | sudo tee /etc/systemd/system/daphne.service > /dev/null
+
 natsservice="$(cat << EOF
 [Unit]
 Description=NATS Server
@@ -435,7 +477,6 @@ EOF
 )"
 echo "${natsservice}" | sudo tee /etc/systemd/system/nats.service > /dev/null
 
-
 nginxrmm="$(cat << EOF
 server_tokens off;
 
@@ -451,15 +492,17 @@ map \$http_user_agent \$ignore_ua {
 
 server {
     listen 80;
+    listen [::]:80;
     server_name ${rmmdomain};
     return 301 https://\$server_name\$request_uri;
 }
 
 server {
     listen 443 ssl;
+    listen [::]:443 ssl;
     server_name ${rmmdomain};
     client_max_body_size 300M;
-    access_log /rmm/api/tacticalrmm/tacticalrmm/private/log/access.log;
+    access_log /rmm/api/tacticalrmm/tacticalrmm/private/log/access.log combined if=\$ignore_ua;
     error_log /rmm/api/tacticalrmm/tacticalrmm/private/log/error.log;
     ssl_certificate ${CERT_PUB_KEY};
     ssl_certificate_key ${CERT_PRIV_KEY};
@@ -475,18 +518,28 @@ server {
         alias /rmm/api/tacticalrmm/tacticalrmm/private/;
     }
 
-    location /saltscripts/ {
-        internal;
-        add_header "Access-Control-Allow-Origin" "https://${frontenddomain}";
-        alias /srv/salt/scripts/userdefined/;
+    location ~ ^/(natsapi) {
+        allow 127.0.0.1;
+        deny all;
+        uwsgi_pass tacticalrmm;
+        include     /etc/nginx/uwsgi_params;
+        uwsgi_read_timeout 500s;
+        uwsgi_ignore_client_abort on;
     }
 
-    location /builtin/ {
-        internal;
-        add_header "Access-Control-Allow-Origin" "https://${frontenddomain}";
-        alias /srv/salt/scripts/;
-    }
+    location ~ ^/ws/ {
+        proxy_pass http://unix:/rmm/daphne.sock;
 
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_redirect     off;
+        proxy_set_header   Host \$host;
+        proxy_set_header   X-Real-IP \$remote_addr;
+        proxy_set_header   X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Host \$server_name;
+    }
 
     location / {
         uwsgi_pass  tacticalrmm;
@@ -503,20 +556,15 @@ echo "${nginxrmm}" | sudo tee /etc/nginx/sites-available/rmm.conf > /dev/null
 nginxmesh="$(cat << EOF
 server {
   listen 80;
+  listen [::]:80;
   server_name ${meshdomain};
-  location / {
-     proxy_pass http://127.0.0.1:800;
-     proxy_http_version 1.1;
-     proxy_set_header X-Forwarded-Host \$host:\$server_port;
-     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-     proxy_set_header X-Forwarded-Proto \$scheme;
-  }
-
+  return 301 https://\$server_name\$request_uri;
 }
 
 server {
 
     listen 443 ssl;
+    listen [::]:443 ssl;
     proxy_send_timeout 330s;
     proxy_read_timeout 330s;
     server_name ${meshdomain};
@@ -530,6 +578,7 @@ server {
         proxy_pass http://127.0.0.1:4430/;
         proxy_http_version 1.1;
 
+        proxy_set_header Host \$host;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header X-Forwarded-Host \$host:\$server_port;
@@ -544,55 +593,11 @@ echo "${nginxmesh}" | sudo tee /etc/nginx/sites-available/meshcentral.conf > /de
 sudo ln -s /etc/nginx/sites-available/rmm.conf /etc/nginx/sites-enabled/rmm.conf
 sudo ln -s /etc/nginx/sites-available/meshcentral.conf /etc/nginx/sites-enabled/meshcentral.conf
 
-print_green 'Installing Salt Master'
-
-wget -O - https://repo.saltstack.com/py3/ubuntu/20.04/amd64/latest/SALTSTACK-GPG-KEY.pub | sudo apt-key add -
-echo 'deb http://repo.saltstack.com/py3/ubuntu/20.04/amd64/latest focal main' | sudo tee /etc/apt/sources.list.d/saltstack.list
-
-sudo apt update
-sudo apt install -y salt-master
-
-print_green 'Waiting 30 seconds for salt to start'
-sleep 30
-
-saltvars="$(cat << EOF
-timeout: 20
-worker_threads: 15
-gather_job_timeout: 25
-max_event_size: 30485760
-external_auth:
-  pam:
-    saltapi:
-      - .*
-      - '@runner'
-      - '@wheel'
-      - '@jobs'
-
-rest_cherrypy:
-  port: 8123
-  disable_ssl: True
-  max_request_body_size: 30485760
-  thread_pool: 300
-  socket_queue_size: 100
-
-EOF
-)"
-echo "${saltvars}" | sudo tee /etc/salt/master.d/rmm-salt.conf > /dev/null
-
-# fix the stupid 1 MB limit present in msgpack 0.6.2, which btw was later changed to 100 MB in msgpack 1.0.0
-# but 0.6.2 is the default on ubuntu 20
-sudo sed -i 's/msgpack_kwargs = {"raw": six.PY2}/msgpack_kwargs = {"raw": six.PY2, "max_buffer_size": 2147483647}/g' /usr/lib/python3/dist-packages/salt/transport/ipc.py
-
-
-
-print_green 'Installing Salt API'
-sudo apt install -y salt-api
-
 sudo mkdir /etc/conf.d
 
 celeryservice="$(cat << EOF
 [Unit]
-Description=Celery Service
+Description=Celery Service V2
 After=network.target redis-server.service postgresql.service
 
 [Service]
@@ -601,9 +606,9 @@ User=${USER}
 Group=${USER}
 EnvironmentFile=/etc/conf.d/celery.conf
 WorkingDirectory=/rmm/api/tacticalrmm
-ExecStart=/bin/sh -c '\${CELERY_BIN} multi start \${CELERYD_NODES} -A \${CELERY_APP} --pidfile=\${CELERYD_PID_FILE} --logfile=\${CELERYD_LOG_FILE} --loglevel=\${CELERYD_LOG_LEVEL} \${CELERYD_OPTS}'
-ExecStop=/bin/sh -c '\${CELERY_BIN} multi stopwait \${CELERYD_NODES} --pidfile=\${CELERYD_PID_FILE}'
-ExecReload=/bin/sh -c '\${CELERY_BIN} multi restart \${CELERYD_NODES} -A \${CELERY_APP} --pidfile=\${CELERYD_PID_FILE} --logfile=\${CELERYD_LOG_FILE} --loglevel=\${CELERYD_LOG_LEVEL} \${CELERYD_OPTS}'
+ExecStart=/bin/sh -c '\${CELERY_BIN} -A \$CELERY_APP multi start \$CELERYD_NODES --pidfile=\${CELERYD_PID_FILE} --logfile=\${CELERYD_LOG_FILE} --loglevel="\${CELERYD_LOG_LEVEL}" \$CELERYD_OPTS'
+ExecStop=/bin/sh -c '\${CELERY_BIN} multi stopwait \$CELERYD_NODES --pidfile=\${CELERYD_PID_FILE} --loglevel="\${CELERYD_LOG_LEVEL}"'
+ExecReload=/bin/sh -c '\${CELERY_BIN} -A \$CELERY_APP multi restart \$CELERYD_NODES --pidfile=\${CELERYD_PID_FILE} --logfile=\${CELERYD_LOG_FILE} --loglevel="\${CELERYD_LOG_LEVEL}" \$CELERYD_OPTS'
 Restart=always
 RestartSec=10s
 
@@ -622,11 +627,11 @@ CELERY_APP="tacticalrmm"
 
 CELERYD_MULTI="multi"
 
-CELERYD_OPTS="--time-limit=2900 --autoscale=50,5"
+CELERYD_OPTS="--time-limit=9999 --autoscale=100,5"
 
 CELERYD_PID_FILE="/rmm/api/tacticalrmm/%n.pid"
 CELERYD_LOG_FILE="/var/log/celery/%n%I.log"
-CELERYD_LOG_LEVEL="INFO"
+CELERYD_LOG_LEVEL="ERROR"
 
 CELERYBEAT_PID_FILE="/rmm/api/tacticalrmm/beat.pid"
 CELERYBEAT_LOG_FILE="/var/log/celery/beat.log"
@@ -634,48 +639,10 @@ EOF
 )"
 echo "${celeryconf}" | sudo tee /etc/conf.d/celery.conf > /dev/null
 
-celerywinupdatesvc="$(cat << EOF
-[Unit]
-Description=Celery WinUpdate Service
-After=network.target redis-server.service postgresql.service
-
-[Service]
-Type=forking
-User=${USER}
-Group=${USER}
-EnvironmentFile=/etc/conf.d/celery-winupdate.conf
-WorkingDirectory=/rmm/api/tacticalrmm
-ExecStart=/bin/sh -c '\${CELERY_BIN} multi start \${CELERYD_NODES} -A \${CELERY_APP} --pidfile=\${CELERYD_PID_FILE} --logfile=\${CELERYD_LOG_FILE} --loglevel=\${CELERYD_LOG_LEVEL} -Q wupdate \${CELERYD_OPTS}'
-ExecStop=/bin/sh -c '\${CELERY_BIN} multi stopwait \${CELERYD_NODES} --pidfile=\${CELERYD_PID_FILE}'
-ExecReload=/bin/sh -c '\${CELERY_BIN} multi restart \${CELERYD_NODES} -A \${CELERY_APP} --pidfile=\${CELERYD_PID_FILE} --logfile=\${CELERYD_LOG_FILE} --loglevel=\${CELERYD_LOG_LEVEL} -Q wupdate \${CELERYD_OPTS}'
-Restart=always
-RestartSec=10s
-
-[Install]
-WantedBy=multi-user.target
-EOF
-)"
-echo "${celerywinupdatesvc}" | sudo tee /etc/systemd/system/celery-winupdate.service > /dev/null
-
-celerywinupdate="$(cat << EOF
-CELERYD_NODES="w2"
-
-CELERY_BIN="/rmm/api/env/bin/celery"
-CELERY_APP="tacticalrmm"
-CELERYD_MULTI="multi"
-
-CELERYD_OPTS="--time-limit=4000 --autoscale=40,1"
-
-CELERYD_PID_FILE="/rmm/api/tacticalrmm/%n.pid"
-CELERYD_LOG_FILE="/var/log/celery/%n%I.log"
-CELERYD_LOG_LEVEL="ERROR"
-EOF
-)"
-echo "${celerywinupdate}" | sudo tee /etc/conf.d/celery-winupdate.conf > /dev/null
 
 celerybeatservice="$(cat << EOF
 [Unit]
-Description=Celery Beat Service
+Description=Celery Beat Service V2
 After=network.target redis-server.service postgresql.service
 
 [Service]
@@ -684,7 +651,7 @@ User=${USER}
 Group=${USER}
 EnvironmentFile=/etc/conf.d/celery.conf
 WorkingDirectory=/rmm/api/tacticalrmm
-ExecStart=/bin/sh -c '\${CELERY_BIN} beat -A \${CELERY_APP} --pidfile=\${CELERYBEAT_PID_FILE} --logfile=\${CELERYBEAT_LOG_FILE} --loglevel=\${CELERYD_LOG_LEVEL}'
+ExecStart=/bin/sh -c '\${CELERY_BIN} -A \${CELERY_APP} beat --pidfile=\${CELERYBEAT_PID_FILE} --logfile=\${CELERYBEAT_LOG_FILE} --loglevel=\${CELERYD_LOG_LEVEL}'
 Restart=always
 RestartSec=10s
 
@@ -694,21 +661,12 @@ EOF
 )"
 echo "${celerybeatservice}" | sudo tee /etc/systemd/system/celerybeat.service > /dev/null
 
-sudo mkdir -p /srv/salt
-sudo cp -r /rmm/_modules /srv/salt/
-sudo cp -r /rmm/scripts /srv/salt/
-sudo mkdir /srv/salt/scripts/userdefined
-sudo chown ${USER}:${USER} -R /srv/salt/
-sudo chown ${USER}:www-data /srv/salt/scripts/userdefined
-sudo chmod 750 /srv/salt/scripts/userdefined
 sudo chown ${USER}:${USER} -R /etc/conf.d/
 
 meshservice="$(cat << EOF
 [Unit]
 Description=MeshCentral Server
-After=network.target
-After=mongod.service
-After=nginx.service
+After=network.target mongod.service nginx.service
 [Service]
 Type=simple
 LimitNOFILE=1000000
@@ -727,12 +685,6 @@ EOF
 echo "${meshservice}" | sudo tee /etc/systemd/system/meshcentral.service > /dev/null
 
 sudo systemctl daemon-reload
-
-
-sudo systemctl enable salt-master
-sudo systemctl enable salt-api
-
-sudo systemctl restart salt-api
 
 sudo chown -R $USER:$GROUP /home/${USER}/.npm
 sudo chown -R $USER:$GROUP /home/${USER}/.config
@@ -767,6 +719,7 @@ server {
     access_log /var/log/nginx/frontend-access.log;
 
     listen 443 ssl;
+    listen [::]:443 ssl;
     ssl_certificate ${CERT_PUB_KEY};
     ssl_certificate_key ${CERT_PRIV_KEY};
     ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384';
@@ -777,7 +730,8 @@ server {
         return 301 https://\$host\$request_uri;
     }
 
-    listen      80;
+    listen 80;
+    listen [::]:80;
     server_name ${frontenddomain};
     return 404;
 }
@@ -790,10 +744,11 @@ sudo ln -s /etc/nginx/sites-available/frontend.conf /etc/nginx/sites-enabled/fro
 
 print_green 'Enabling Services'
 
-for i in nginx celery.service celerybeat.service celery-winupdate.service rmm.service
+for i in rmm.service daphne.service celery.service celerybeat.service nginx
 do
   sudo systemctl enable ${i}
-  sudo systemctl restart ${i}
+  sudo systemctl stop ${i}
+  sudo systemctl start ${i}
 done
 sleep 5
 sudo systemctl enable meshcentral
@@ -855,17 +810,15 @@ python manage.py reload_nats
 deactivate
 sudo systemctl start nats.service
 
+## disable django admin
+sed -i 's/ADMIN_ENABLED = True/ADMIN_ENABLED = False/g' /rmm/api/tacticalrmm/tacticalrmm/local_settings.py
 
 print_green 'Restarting services'
-for i in celery.service celerybeat.service celery-winupdate.service rmm.service
+for i in rmm.service daphne.service celery.service celerybeat.service
 do
-  sudo systemctl restart ${i}
+  sudo systemctl stop ${i}
+  sudo systemctl start ${i}
 done
-
-print_green 'Restarting salt-master and waiting 30 seconds'
-sudo systemctl restart salt-master
-sleep 30
-sudo systemctl restart salt-api
 
 printf >&2 "${YELLOW}%0.s*${NC}" {1..80}
 printf >&2 "\n\n"
@@ -875,14 +828,15 @@ echo ${MESHEXE} | sed 's/{.*}//'
 printf >&2 "${NC}\n\n"
 printf >&2 "${YELLOW}Access your rmm at: ${GREEN}https://${frontenddomain}${NC}\n\n"
 printf >&2 "${YELLOW}Django admin url: ${GREEN}https://${rmmdomain}/${ADMINURL}${NC}\n\n"
+printf >&2 "${YELLOW}MeshCentral username: ${GREEN}${meshusername}${NC}\n"
 printf >&2 "${YELLOW}MeshCentral password: ${GREEN}${MESHPASSWD}${NC}\n\n"
 
 if [ "$BEHIND_NAT" = true ]; then
-    echo -ne "${YELLOW}Read below if your router does NOT support Hairpin NAT${NC}\n\n"  
+    echo -ne "${YELLOW}Read below if your router does NOT support Hairpin NAT${NC}\n\n"
     echo -ne "${GREEN}If you will be accessing the web interface of the RMM from the same LAN as this server,${NC}\n"
     echo -ne "${GREEN}you'll need to make sure your 3 subdomains resolve to ${IPV4}${NC}\n"
     echo -ne "${GREEN}This also applies to any agents that will be on the same local network as the rmm.${NC}\n"
-    echo -ne "${GREEN}You'll also need to setup port forwarding in your router on ports 80, 443, 4505, 4506 and 4222 tcp.${NC}\n\n"
+    echo -ne "${GREEN}You'll also need to setup port forwarding in your router on ports 80, 443 and 4222 tcp.${NC}\n\n"
 fi
 
 printf >&2 "${YELLOW}Please refer to the github README for next steps${NC}\n\n"

@@ -1,6 +1,6 @@
 from django.db import models
+
 from agents.models import Agent
-from clients.models import Site, Client
 from core.models import CoreSettings
 from logs.models import BaseAuditModel
 
@@ -10,39 +10,113 @@ class Policy(BaseAuditModel):
     desc = models.CharField(max_length=255, null=True, blank=True)
     active = models.BooleanField(default=False)
     enforced = models.BooleanField(default=False)
+    alert_template = models.ForeignKey(
+        "alerts.AlertTemplate",
+        related_name="policies",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    excluded_sites = models.ManyToManyField(
+        "clients.Site", related_name="policy_exclusions", blank=True
+    )
+    excluded_clients = models.ManyToManyField(
+        "clients.Client", related_name="policy_exclusions", blank=True
+    )
+    excluded_agents = models.ManyToManyField(
+        "agents.Agent", related_name="policy_exclusions", blank=True
+    )
 
-    @property
-    def is_default_server_policy(self):
-        return self.default_server_policy.exists()
+    def save(self, *args, **kwargs):
+        from alerts.tasks import cache_agents_alert_template
+        from automation.tasks import generate_agent_checks_task
 
-    @property
-    def is_default_workstation_policy(self):
-        return self.default_workstation_policy.exists()
+        # get old policy if exists
+        old_policy = type(self).objects.get(pk=self.pk) if self.pk else None
+        super(BaseAuditModel, self).save(*args, **kwargs)
+
+        # generate agent checks only if active and enforced were changed
+        if old_policy:
+            if old_policy.active != self.active or old_policy.enforced != self.enforced:
+                generate_agent_checks_task.delay(
+                    policy=self.pk,
+                    create_tasks=True,
+                )
+
+            if old_policy.alert_template != self.alert_template:
+                cache_agents_alert_template.delay()
+
+    def delete(self, *args, **kwargs):
+        from automation.tasks import generate_agent_checks_task
+
+        agents = list(self.related_agents().only("pk").values_list("pk", flat=True))
+        super(BaseAuditModel, self).delete(*args, **kwargs)
+
+        generate_agent_checks_task.delay(agents=agents, create_tasks=True)
 
     def __str__(self):
         return self.name
+
+    @property
+    def is_default_server_policy(self):
+        return self.default_server_policy.exists()  # type: ignore
+
+    @property
+    def is_default_workstation_policy(self):
+        return self.default_workstation_policy.exists()  # type: ignore
+
+    def is_agent_excluded(self, agent):
+        return (
+            agent in self.excluded_agents.all()
+            or agent.site in self.excluded_sites.all()
+            or agent.client in self.excluded_clients.all()
+        )
 
     def related_agents(self):
         return self.get_related("server") | self.get_related("workstation")
 
     def get_related(self, mon_type):
-        explicit_agents = self.agents.filter(monitoring_type=mon_type)
-        explicit_clients = getattr(self, f"{mon_type}_clients").all()
-        explicit_sites = getattr(self, f"{mon_type}_sites").all()
+        explicit_agents = (
+            self.agents.filter(monitoring_type=mon_type)  # type: ignore
+            .exclude(
+                pk__in=self.excluded_agents.only("pk").values_list("pk", flat=True)
+            )
+            .exclude(site__in=self.excluded_sites.all())
+            .exclude(site__client__in=self.excluded_clients.all())
+        )
+
+        explicit_clients = getattr(self, f"{mon_type}_clients").exclude(
+            pk__in=self.excluded_clients.all()
+        )
+        explicit_sites = getattr(self, f"{mon_type}_sites").exclude(
+            pk__in=self.excluded_sites.all()
+        )
 
         filtered_agents_pks = Policy.objects.none()
 
-        filtered_agents_pks |= Agent.objects.filter(
-            site__in=[
-                site for site in explicit_sites if site.client not in explicit_clients
-            ],
-            monitoring_type=mon_type,
-        ).values_list("pk", flat=True)
+        filtered_agents_pks |= (
+            Agent.objects.exclude(block_policy_inheritance=True)
+            .filter(
+                site__in=[
+                    site
+                    for site in explicit_sites
+                    if site.client not in explicit_clients
+                    and site.client not in self.excluded_clients.all()
+                ],
+                monitoring_type=mon_type,
+            )
+            .values_list("pk", flat=True)
+        )
 
-        filtered_agents_pks |= Agent.objects.filter(
-            site__client__in=[client for client in explicit_clients],
-            monitoring_type=mon_type,
-        ).values_list("pk", flat=True)
+        filtered_agents_pks |= (
+            Agent.objects.exclude(block_policy_inheritance=True)
+            .exclude(site__block_policy_inheritance=True)
+            .filter(
+                site__client__in=[client for client in explicit_clients],
+                monitoring_type=mon_type,
+            )
+            .values_list("pk", flat=True)
+        )
 
         return Agent.objects.filter(
             models.Q(pk__in=filtered_agents_pks)
@@ -58,6 +132,7 @@ class Policy(BaseAuditModel):
 
     @staticmethod
     def cascade_policy_tasks(agent):
+
         # List of all tasks to be applied
         tasks = list()
         added_task_pks = list()
@@ -80,32 +155,78 @@ class Policy(BaseAuditModel):
             default_policy = CoreSettings.objects.first().server_policy
             client_policy = client.server_policy
             site_policy = site.server_policy
-        else:
+        elif agent.monitoring_type == "workstation":
             default_policy = CoreSettings.objects.first().workstation_policy
             client_policy = client.workstation_policy
             site_policy = site.workstation_policy
 
-        if agent_policy and agent_policy.active:
+        # check if client/site/agent is blocking inheritance and blank out policies
+        if agent.block_policy_inheritance:
+            site_policy = None
+            client_policy = None
+            default_policy = None
+        elif site.block_policy_inheritance:
+            client_policy = None
+            default_policy = None
+        elif client.block_policy_inheritance:
+            default_policy = None
+
+        if (
+            agent_policy
+            and agent_policy.active
+            and not agent_policy.is_agent_excluded(agent)
+        ):
             for task in agent_policy.autotasks.all():
                 if task.pk not in added_task_pks:
                     tasks.append(task)
                     added_task_pks.append(task.pk)
-        if site_policy and site_policy.active:
+        if (
+            site_policy
+            and site_policy.active
+            and not site_policy.is_agent_excluded(agent)
+        ):
             for task in site_policy.autotasks.all():
                 if task.pk not in added_task_pks:
                     tasks.append(task)
                     added_task_pks.append(task.pk)
-        if client_policy and client_policy.active:
+        if (
+            client_policy
+            and client_policy.active
+            and not client_policy.is_agent_excluded(agent)
+        ):
             for task in client_policy.autotasks.all():
                 if task.pk not in added_task_pks:
                     tasks.append(task)
                     added_task_pks.append(task.pk)
 
-        if default_policy and default_policy.active:
+        if (
+            default_policy
+            and default_policy.active
+            and not default_policy.is_agent_excluded(agent)
+        ):
             for task in default_policy.autotasks.all():
                 if task.pk not in added_task_pks:
                     tasks.append(task)
                     added_task_pks.append(task.pk)
+
+        # remove policy tasks from agent not included in policy
+        for task in agent.autotasks.filter(
+            parent_task__in=[
+                taskpk
+                for taskpk in agent_tasks_parent_pks
+                if taskpk not in added_task_pks
+            ]
+        ):
+            if task.sync_status == "initial":
+                task.delete()
+            else:
+                task.sync_status = "pendingdeletion"
+                task.save()
+
+        # change tasks from pendingdeletion to notsynced if policy was added or changed
+        agent.autotasks.filter(sync_status="pendingdeletion").filter(
+            parent_task__in=[taskpk for taskpk in added_task_pks]
+        ).update(sync_status="notsynced")
 
         return [task for task in tasks if task.pk not in agent_tasks_parent_pks]
 
@@ -132,17 +253,32 @@ class Policy(BaseAuditModel):
             default_policy = CoreSettings.objects.first().server_policy
             client_policy = client.server_policy
             site_policy = site.server_policy
-        else:
+        elif agent.monitoring_type == "workstation":
             default_policy = CoreSettings.objects.first().workstation_policy
             client_policy = client.workstation_policy
             site_policy = site.workstation_policy
+
+        # check if client/site/agent is blocking inheritance and blank out policies
+        if agent.block_policy_inheritance:
+            site_policy = None
+            client_policy = None
+            default_policy = None
+        elif site.block_policy_inheritance:
+            client_policy = None
+            default_policy = None
+        elif client.block_policy_inheritance:
+            default_policy = None
 
         # Used to hold the policies that will be applied and the order in which they are applied
         # Enforced policies are applied first
         enforced_checks = list()
         policy_checks = list()
 
-        if agent_policy and agent_policy.active:
+        if (
+            agent_policy
+            and agent_policy.active
+            and not agent_policy.is_agent_excluded(agent)
+        ):
             if agent_policy.enforced:
                 for check in agent_policy.policychecks.all():
                     enforced_checks.append(check)
@@ -150,7 +286,11 @@ class Policy(BaseAuditModel):
                 for check in agent_policy.policychecks.all():
                     policy_checks.append(check)
 
-        if site_policy and site_policy.active:
+        if (
+            site_policy
+            and site_policy.active
+            and not site_policy.is_agent_excluded(agent)
+        ):
             if site_policy.enforced:
                 for check in site_policy.policychecks.all():
                     enforced_checks.append(check)
@@ -158,7 +298,11 @@ class Policy(BaseAuditModel):
                 for check in site_policy.policychecks.all():
                     policy_checks.append(check)
 
-        if client_policy and client_policy.active:
+        if (
+            client_policy
+            and client_policy.active
+            and not client_policy.is_agent_excluded(agent)
+        ):
             if client_policy.enforced:
                 for check in client_policy.policychecks.all():
                     enforced_checks.append(check)
@@ -166,7 +310,11 @@ class Policy(BaseAuditModel):
                 for check in client_policy.policychecks.all():
                     policy_checks.append(check)
 
-        if default_policy and default_policy.active:
+        if (
+            default_policy
+            and default_policy.active
+            and not default_policy.is_agent_excluded(agent)
+        ):
             if default_policy.enforced:
                 for check in default_policy.policychecks.all():
                     enforced_checks.append(check)
@@ -279,6 +427,16 @@ class Policy(BaseAuditModel):
             + script_checks
             + eventlog_checks
         )
+
+        # remove policy checks from agent that fell out of policy scope
+        agent.agentchecks.filter(
+            managed_by_policy=True,
+            parent_check__in=[
+                checkpk
+                for checkpk in agent_checks_parent_pks
+                if checkpk not in [check.pk for check in final_list]
+            ],
+        ).delete()
 
         return [
             check for check in final_list if check.pk not in agent_checks_parent_pks

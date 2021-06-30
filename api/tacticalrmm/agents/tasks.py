@@ -1,349 +1,347 @@
 import asyncio
-from loguru import logger
-from time import sleep
+import datetime as dt
 import random
-import requests
-from packaging import version as pyver
-
+import tempfile
+import json
+import subprocess
+import urllib.parse
+from time import sleep
+from typing import Union
 
 from django.conf import settings
+from django.utils import timezone as djangotime
+from loguru import logger
+from packaging import version as pyver
 
-
-from tacticalrmm.celery import app
-from agents.models import Agent, AgentOutage
-from core.models import CoreSettings
+from agents.models import Agent
+from core.models import CodeSignToken, CoreSettings
 from logs.models import PendingAction
+from scripts.models import Script
+from tacticalrmm.celery import app
+from tacticalrmm.utils import run_nats_api_cmd
 
 logger.configure(**settings.LOG_CONFIG)
 
-OLD_64_PY_AGENT = "https://github.com/wh1te909/winagent/releases/download/v0.11.2/winagent-v0.11.2.exe"
-OLD_32_PY_AGENT = "https://github.com/wh1te909/winagent/releases/download/v0.11.2/winagent-v0.11.2-x86.exe"
+
+def agent_update(pk: int, codesigntoken: str = None, force: bool = False) -> str:
+    from agents.utils import get_exegen_url
+
+    agent = Agent.objects.get(pk=pk)
+
+    if pyver.parse(agent.version) <= pyver.parse("1.3.0"):
+        return "not supported"
+
+    # skip if we can't determine the arch
+    if agent.arch is None:
+        logger.warning(
+            f"Unable to determine arch on {agent.hostname}. Skipping agent update."
+        )
+        return "noarch"
+
+    version = settings.LATEST_AGENT_VER
+    inno = agent.win_inno_exe
+
+    if codesigntoken is not None and pyver.parse(version) >= pyver.parse("1.5.0"):
+        base_url = get_exegen_url() + "/api/v1/winagents/?"
+        params = {"version": version, "arch": agent.arch, "token": codesigntoken}
+        url = base_url + urllib.parse.urlencode(params)
+    else:
+        url = agent.winagent_dl
+
+    if not force:
+        if agent.pendingactions.filter(
+            action_type="agentupdate", status="pending"
+        ).exists():
+            agent.pendingactions.filter(
+                action_type="agentupdate", status="pending"
+            ).delete()
+
+        PendingAction.objects.create(
+            agent=agent,
+            action_type="agentupdate",
+            details={
+                "url": url,
+                "version": version,
+                "inno": inno,
+            },
+        )
+
+    nats_data = {
+        "func": "agentupdate",
+        "payload": {
+            "url": url,
+            "version": version,
+            "inno": inno,
+        },
+    }
+    asyncio.run(agent.nats_cmd(nats_data, wait=False))
+    return "created"
 
 
 @app.task
-def send_agent_update_task(pks, version):
-    assert isinstance(pks, list)
-
-    q = Agent.objects.filter(pk__in=pks)
-    agents = [i.pk for i in q if pyver.parse(i.version) < pyver.parse(version)]
-
-    chunks = (agents[i : i + 30] for i in range(0, len(agents), 30))
-
-    for chunk in chunks:
-        for pk in chunk:
-            agent = Agent.objects.get(pk=pk)
-
-            # skip if we can't determine the arch
-            if agent.arch is None:
-                logger.warning(
-                    f"Unable to determine arch on {agent.salt_id}. Skipping."
-                )
-                continue
-
-            # golang agent only backwards compatible with py agent 0.11.2
-            # force an upgrade to the latest python agent if version < 0.11.2
-            if pyver.parse(agent.version) < pyver.parse("0.11.2"):
-                url = OLD_64_PY_AGENT if agent.arch == "64" else OLD_32_PY_AGENT
-                inno = (
-                    "winagent-v0.11.2.exe"
-                    if agent.arch == "64"
-                    else "winagent-v0.11.2-x86.exe"
-                )
-            else:
-                url = agent.winagent_dl
-                inno = agent.win_inno_exe
-            logger.info(
-                f"Updating {agent.salt_id} current version {agent.version} using {inno}"
-            )
-
-            if agent.has_nats:
-                if agent.pendingactions.filter(
-                    action_type="agentupdate", status="pending"
-                ).exists():
-                    continue
-
-                PendingAction.objects.create(
-                    agent=agent,
-                    action_type="agentupdate",
-                    details={
-                        "url": agent.winagent_dl,
-                        "version": settings.LATEST_AGENT_VER,
-                        "inno": agent.win_inno_exe,
-                    },
-                )
-            # TODO
-            # Salt is deprecated, remove this once salt is gone
-            else:
-                r = agent.salt_api_async(
-                    func="win_agent.do_agent_update_v2",
-                    kwargs={
-                        "inno": inno,
-                        "url": url,
-                    },
-                )
-        sleep(10)
-
-
-@app.task
-def auto_self_agent_update_task():
-    core = CoreSettings.objects.first()
-    if not core.agent_auto_update:
-        logger.info("Agent auto update is disabled. Skipping.")
+def force_code_sign(pks: list[int]) -> None:
+    try:
+        token = CodeSignToken.objects.first().token
+    except:
         return
 
+    chunks = (pks[i : i + 50] for i in range(0, len(pks), 50))
+    for chunk in chunks:
+        for pk in chunk:
+            agent_update(pk=pk, codesigntoken=token, force=True)
+            sleep(0.05)
+        sleep(4)
+
+
+@app.task
+def send_agent_update_task(pks: list[int]) -> None:
+    try:
+        codesigntoken = CodeSignToken.objects.first().token
+    except:
+        codesigntoken = None
+
+    chunks = (pks[i : i + 30] for i in range(0, len(pks), 30))
+    for chunk in chunks:
+        for pk in chunk:
+            agent_update(pk, codesigntoken)
+            sleep(0.05)
+        sleep(4)
+
+
+@app.task
+def auto_self_agent_update_task() -> None:
+    core = CoreSettings.objects.first()
+    if not core.agent_auto_update:
+        return
+
+    try:
+        codesigntoken = CodeSignToken.objects.first().token
+    except:
+        codesigntoken = None
+
     q = Agent.objects.only("pk", "version")
-    agents = [
+    pks: list[int] = [
         i.pk
         for i in q
         if pyver.parse(i.version) < pyver.parse(settings.LATEST_AGENT_VER)
     ]
-    logger.info(f"Updating {len(agents)}")
 
-    chunks = (agents[i : i + 30] for i in range(0, len(agents), 30))
-
+    chunks = (pks[i : i + 30] for i in range(0, len(pks), 30))
     for chunk in chunks:
         for pk in chunk:
-            agent = Agent.objects.get(pk=pk)
-
-            # skip if we can't determine the arch
-            if agent.arch is None:
-                logger.warning(
-                    f"Unable to determine arch on {agent.salt_id}. Skipping."
-                )
-                continue
-
-            # golang agent only backwards compatible with py agent 0.11.2
-            # force an upgrade to the latest python agent if version < 0.11.2
-            if pyver.parse(agent.version) < pyver.parse("0.11.2"):
-                url = OLD_64_PY_AGENT if agent.arch == "64" else OLD_32_PY_AGENT
-                inno = (
-                    "winagent-v0.11.2.exe"
-                    if agent.arch == "64"
-                    else "winagent-v0.11.2-x86.exe"
-                )
-            else:
-                url = agent.winagent_dl
-                inno = agent.win_inno_exe
-            logger.info(
-                f"Updating {agent.salt_id} current version {agent.version} using {inno}"
-            )
-
-            if agent.has_nats:
-                if agent.pendingactions.filter(
-                    action_type="agentupdate", status="pending"
-                ).exists():
-                    continue
-
-                PendingAction.objects.create(
-                    agent=agent,
-                    action_type="agentupdate",
-                    details={
-                        "url": agent.winagent_dl,
-                        "version": settings.LATEST_AGENT_VER,
-                        "inno": agent.win_inno_exe,
-                    },
-                )
-            # TODO
-            # Salt is deprecated, remove this once salt is gone
-            else:
-                r = agent.salt_api_async(
-                    func="win_agent.do_agent_update_v2",
-                    kwargs={
-                        "inno": inno,
-                        "url": url,
-                    },
-                )
-        sleep(10)
+            agent_update(pk, codesigntoken)
+            sleep(0.05)
+        sleep(4)
 
 
 @app.task
-def update_salt_minion_task():
-    q = Agent.objects.all()
-    agents = [
-        i.pk
-        for i in q
-        if pyver.parse(i.version) >= pyver.parse("0.11.0")
-        and pyver.parse(i.salt_ver) < pyver.parse(settings.LATEST_SALT_VER)
-    ]
+def agent_outage_email_task(pk: int, alert_interval: Union[float, None] = None) -> str:
+    from alerts.models import Alert
 
-    chunks = (agents[i : i + 50] for i in range(0, len(agents), 50))
+    alert = Alert.objects.get(pk=pk)
 
-    for chunk in chunks:
-        for pk in chunk:
-            agent = Agent.objects.get(pk=pk)
-            r = agent.salt_api_async(func="win_agent.update_salt")
-        sleep(20)
-
-
-@app.task
-def get_wmi_detail_task(pk):
-    agent = Agent.objects.get(pk=pk)
-    if agent.has_nats:
-        asyncio.run(agent.nats_cmd({"func": "sysinfo"}, wait=False))
+    if not alert.email_sent:
+        sleep(random.randint(1, 15))
+        alert.agent.send_outage_email()
+        alert.email_sent = djangotime.now()
+        alert.save(update_fields=["email_sent"])
     else:
-        agent.salt_api_async(timeout=30, func="win_agent.local_sys_info")
+        if alert_interval:
+            # send an email only if the last email sent is older than alert interval
+            delta = djangotime.now() - dt.timedelta(days=alert_interval)
+            if alert.email_sent < delta:
+                sleep(random.randint(1, 10))
+                alert.agent.send_outage_email()
+                alert.email_sent = djangotime.now()
+                alert.save(update_fields=["email_sent"])
 
     return "ok"
 
 
 @app.task
-def sync_salt_modules_task(pk):
-    agent = Agent.objects.get(pk=pk)
-    r = agent.salt_api_cmd(timeout=35, func="saltutil.sync_modules")
-    # successful sync if new/charnged files: {'return': [{'MINION-15': ['modules.get_eventlog', 'modules.win_agent', 'etc...']}]}
-    # successful sync with no new/changed files: {'return': [{'MINION-15': []}]}
-    if r == "timeout" or r == "error":
-        return f"Unable to sync modules {agent.salt_id}"
+def agent_recovery_email_task(pk: int) -> str:
+    from alerts.models import Alert
 
-    return f"Successfully synced salt modules on {agent.hostname}"
-
-
-@app.task
-def batch_sync_modules_task():
-    # sync modules, split into chunks of 50 agents to not overload salt
-    agents = Agent.objects.all()
-    online = [i.salt_id for i in agents]
-    chunks = (online[i : i + 50] for i in range(0, len(online), 50))
-    for chunk in chunks:
-        Agent.salt_batch_async(minions=chunk, func="saltutil.sync_modules")
-        sleep(10)
-
-
-@app.task
-def batch_sysinfo_task():
-    # update system info using WMI
-    agents = Agent.objects.all()
-
-    agents_nats = [agent for agent in agents if agent.has_nats]
-    minions = [
-        agent.salt_id
-        for agent in agents
-        if not agent.has_nats and pyver.parse(agent.version) >= pyver.parse("0.11.0")
-    ]
-
-    if minions:
-        Agent.salt_batch_async(minions=minions, func="win_agent.local_sys_info")
-
-    for agent in agents_nats:
-        asyncio.run(agent.nats_cmd({"func": "sysinfo"}, wait=False))
-
-
-@app.task
-def uninstall_agent_task(salt_id, has_nats):
-    attempts = 0
-    error = False
-
-    if not has_nats:
-        while 1:
-            try:
-
-                r = requests.post(
-                    f"http://{settings.SALT_HOST}:8123/run",
-                    json=[
-                        {
-                            "client": "local",
-                            "tgt": salt_id,
-                            "fun": "win_agent.uninstall_agent",
-                            "timeout": 8,
-                            "username": settings.SALT_USERNAME,
-                            "password": settings.SALT_PASSWORD,
-                            "eauth": "pam",
-                        }
-                    ],
-                    timeout=10,
-                )
-                ret = r.json()["return"][0][salt_id]
-            except Exception:
-                attempts += 1
-            else:
-                if ret != "ok":
-                    attempts += 1
-                else:
-                    attempts = 0
-
-            if attempts >= 10:
-                error = True
-                break
-            elif attempts == 0:
-                break
-
-    if error:
-        logger.error(f"{salt_id} uninstall failed")
-    else:
-        logger.info(f"{salt_id} was successfully uninstalled")
-
-    try:
-        r = requests.post(
-            f"http://{settings.SALT_HOST}:8123/run",
-            json=[
-                {
-                    "client": "wheel",
-                    "fun": "key.delete",
-                    "match": salt_id,
-                    "username": settings.SALT_USERNAME,
-                    "password": settings.SALT_PASSWORD,
-                    "eauth": "pam",
-                }
-            ],
-            timeout=30,
-        )
-    except Exception:
-        logger.error(f"{salt_id} unable to remove salt-key")
+    sleep(random.randint(1, 15))
+    alert = Alert.objects.get(pk=pk)
+    alert.agent.send_recovery_email()
+    alert.resolved_email_sent = djangotime.now()
+    alert.save(update_fields=["resolved_email_sent"])
 
     return "ok"
 
 
 @app.task
-def agent_outage_email_task(pk):
-    sleep(random.randint(1, 15))
-    outage = AgentOutage.objects.get(pk=pk)
-    outage.send_outage_email()
-    outage.outage_email_sent = True
-    outage.save(update_fields=["outage_email_sent"])
+def agent_outage_sms_task(pk: int, alert_interval: Union[float, None] = None) -> str:
+    from alerts.models import Alert
+
+    alert = Alert.objects.get(pk=pk)
+
+    if not alert.sms_sent:
+        sleep(random.randint(1, 15))
+        alert.agent.send_outage_sms()
+        alert.sms_sent = djangotime.now()
+        alert.save(update_fields=["sms_sent"])
+    else:
+        if alert_interval:
+            # send an sms only if the last sms sent is older than alert interval
+            delta = djangotime.now() - dt.timedelta(days=alert_interval)
+            if alert.sms_sent < delta:
+                sleep(random.randint(1, 10))
+                alert.agent.send_outage_sms()
+                alert.sms_sent = djangotime.now()
+                alert.save(update_fields=["sms_sent"])
+
+    return "ok"
 
 
 @app.task
-def agent_recovery_email_task(pk):
-    sleep(random.randint(1, 15))
-    outage = AgentOutage.objects.get(pk=pk)
-    outage.send_recovery_email()
-    outage.recovery_email_sent = True
-    outage.save(update_fields=["recovery_email_sent"])
+def agent_recovery_sms_task(pk: int) -> str:
+    from alerts.models import Alert
 
-
-@app.task
-def agent_outage_sms_task(pk):
     sleep(random.randint(1, 3))
-    outage = AgentOutage.objects.get(pk=pk)
-    outage.send_outage_sms()
-    outage.outage_sms_sent = True
-    outage.save(update_fields=["outage_sms_sent"])
+    alert = Alert.objects.get(pk=pk)
+    alert.agent.send_recovery_sms()
+    alert.resolved_sms_sent = djangotime.now()
+    alert.save(update_fields=["resolved_sms_sent"])
+
+    return "ok"
 
 
 @app.task
-def agent_recovery_sms_task(pk):
-    sleep(random.randint(1, 3))
-    outage = AgentOutage.objects.get(pk=pk)
-    outage.send_recovery_sms()
-    outage.recovery_sms_sent = True
-    outage.save(update_fields=["recovery_sms_sent"])
+def agent_outages_task() -> None:
+    from alerts.models import Alert
 
-
-@app.task
-def agent_outages_task():
-    agents = Agent.objects.only("pk")
+    agents = Agent.objects.only(
+        "pk",
+        "agent_id",
+        "last_seen",
+        "offline_time",
+        "overdue_time",
+        "overdue_email_alert",
+        "overdue_text_alert",
+        "overdue_dashboard_alert",
+    )
 
     for agent in agents:
         if agent.status == "overdue":
-            outages = AgentOutage.objects.filter(agent=agent)
-            if outages and outages.last().is_active:
-                continue
+            Alert.handle_alert_failure(agent)
 
-            outage = AgentOutage(agent=agent)
-            outage.save()
 
-            if agent.overdue_email_alert and not agent.maintenance_mode:
-                agent_outage_email_task.delay(pk=outage.pk)
+@app.task
+def run_script_email_results_task(
+    agentpk: int,
+    scriptpk: int,
+    nats_timeout: int,
+    emails: list[str],
+    args: list[str] = [],
+):
+    agent = Agent.objects.get(pk=agentpk)
+    script = Script.objects.get(pk=scriptpk)
+    r = agent.run_script(
+        scriptpk=script.pk, args=args, full=True, timeout=nats_timeout, wait=True
+    )
+    if r == "timeout":
+        logger.error(f"{agent.hostname} timed out running script.")
+        return
 
-            if agent.overdue_text_alert and not agent.maintenance_mode:
-                agent_outage_sms_task.delay(pk=outage.pk)
+    CORE = CoreSettings.objects.first()
+    subject = f"{agent.hostname} {script.name} Results"
+    exec_time = "{:.4f}".format(r["execution_time"])
+    body = (
+        subject
+        + f"\nReturn code: {r['retcode']}\nExecution time: {exec_time} seconds\nStdout: {r['stdout']}\nStderr: {r['stderr']}"
+    )
+
+    import smtplib
+    from email.message import EmailMessage
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = CORE.smtp_from_email
+
+    if emails:
+        msg["To"] = ", ".join(emails)
+    else:
+        msg["To"] = ", ".join(CORE.email_alert_recipients)
+
+    msg.set_content(body)
+
+    try:
+        with smtplib.SMTP(CORE.smtp_host, CORE.smtp_port, timeout=20) as server:
+            if CORE.smtp_requires_auth:
+                server.ehlo()
+                server.starttls()
+                server.login(CORE.smtp_host_user, CORE.smtp_host_password)
+                server.send_message(msg)
+                server.quit()
+            else:
+                server.send_message(msg)
+                server.quit()
+    except Exception as e:
+        logger.error(e)
+
+
+@app.task
+def clear_faults_task(older_than_days: int) -> None:
+    # https://github.com/wh1te909/tacticalrmm/issues/484
+    agents = Agent.objects.exclude(last_seen__isnull=True).filter(
+        last_seen__lt=djangotime.now() - djangotime.timedelta(days=older_than_days)
+    )
+    for agent in agents:
+        if agent.agentchecks.exists():
+            for check in agent.agentchecks.all():
+                # reset check status
+                check.status = "passing"
+                check.save(update_fields=["status"])
+                if check.alert.filter(resolved=False).exists():
+                    check.alert.get(resolved=False).resolve()
+
+        # reset overdue alerts
+        agent.overdue_email_alert = False
+        agent.overdue_text_alert = False
+        agent.overdue_dashboard_alert = False
+        agent.save(
+            update_fields=[
+                "overdue_email_alert",
+                "overdue_text_alert",
+                "overdue_dashboard_alert",
+            ]
+        )
+
+
+@app.task
+def monitor_agents_task() -> None:
+    agents = Agent.objects.only(
+        "pk", "agent_id", "last_seen", "overdue_time", "offline_time"
+    )
+    ids = [i.agent_id for i in agents if i.status != "online"]
+    run_nats_api_cmd("monitor", ids)
+
+
+@app.task
+def get_wmi_task() -> None:
+    agents = Agent.objects.only(
+        "pk", "agent_id", "last_seen", "overdue_time", "offline_time"
+    )
+    ids = [i.agent_id for i in agents if i.status == "online"]
+    run_nats_api_cmd("wmi", ids, timeout=45)
+
+
+@app.task
+def agent_checkin_task() -> None:
+    db = settings.DATABASES["default"]
+    config = {
+        "key": settings.SECRET_KEY,
+        "natsurl": f"tls://{settings.ALLOWED_HOSTS[0]}:4222",
+        "user": db["USER"],
+        "pass": db["PASSWORD"],
+        "host": db["HOST"],
+        "port": int(db["PORT"]),
+        "dbname": db["NAME"],
+    }
+    with tempfile.NamedTemporaryFile() as fp:
+        with open(fp.name, "w") as f:
+            json.dump(config, f)
+        cmd = ["/usr/local/bin/nats-api", "-c", fp.name, "-m", "checkin"]
+        subprocess.run(cmd, timeout=30)

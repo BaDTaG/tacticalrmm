@@ -1,5 +1,5 @@
 <template>
-  <q-card v-if="scripts.length === 0" style="min-width: 400px">
+  <q-card v-if="scriptOptions.length === 0" style="min-width: 400px">
     <q-card-section class="row items-center">
       <div class="text-h6">Add Script Check</div>
       <q-space />
@@ -31,7 +31,19 @@
           map-options
           emit-value
           :disable="this.mode === 'edit'"
-        />
+          @update:model-value="setScriptDefaults"
+        >
+          <template v-slot:option="scope">
+            <q-item v-if="!scope.opt.category" v-bind="scope.itemProps" class="q-pl-lg">
+              <q-item-section>
+                <q-item-label v-html="scope.opt.label"></q-item-label>
+              </q-item-section>
+            </q-item>
+            <q-item-label v-if="scope.opt.category" v-bind="scope.itemProps" header class="q-pa-sm">{{
+              scope.opt.category
+            }}</q-item-label>
+          </template>
+        </q-select>
       </q-card-section>
       <q-card-section>
         <q-select
@@ -48,17 +60,37 @@
         />
       </q-card-section>
       <q-card-section>
-        <q-input
-          outlined
+        <q-select
           dense
-          v-model.number="scriptcheck.timeout"
-          label="Timeout (seconds)"
-          :rules="[
-            val => !!val || '*Required',
-            val => val >= 10 || 'Minimum is 10 seconds',
-            val => val <= 86400 || 'Maximum is 86400 seconds',
-          ]"
+          label="Informational return codes (press Enter after typing each code)"
+          filled
+          v-model="scriptcheck.info_return_codes"
+          use-input
+          use-chips
+          multiple
+          hide-dropdown-icon
+          input-debounce="0"
+          new-value-mode="add-unique"
+          @new-value="validateRetcode"
         />
+      </q-card-section>
+      <q-card-section>
+        <q-select
+          dense
+          label="Warning return codes (press Enter after typing each code)"
+          filled
+          v-model="scriptcheck.warning_return_codes"
+          use-input
+          use-chips
+          multiple
+          hide-dropdown-icon
+          input-debounce="0"
+          new-value-mode="add-unique"
+          @new-value="validateRetcode"
+        />
+      </q-card-section>
+      <q-card-section>
+        <q-input outlined dense v-model.number="scriptcheck.timeout" label="Timeout (seconds)" />
       </q-card-section>
       <q-card-section>
         <q-select
@@ -68,6 +100,16 @@
           v-model="scriptcheck.fails_b4_alert"
           :options="failOptions"
           label="Number of consecutive failures before alert"
+        />
+      </q-card-section>
+      <q-card-section>
+        <q-input
+          outlined
+          dense
+          type="number"
+          v-model.number="scriptcheck.run_interval"
+          label="Run this check every (seconds)"
+          hint="Setting this value to anything other than 0 will override the 'Run checks every' setting on the agent"
         />
       </q-card-section>
       <q-card-actions align="right">
@@ -80,11 +122,12 @@
 </template>
 
 <script>
-import axios from "axios";
 import mixins from "@/mixins/mixins";
-import { mapGetters, mapState } from "vuex";
+import { mapGetters } from "vuex";
+
 export default {
   name: "ScriptCheck",
+  emits: ["close"],
   props: {
     agentpk: Number,
     policypk: Number,
@@ -100,26 +143,26 @@ export default {
         script_args: [],
         timeout: 120,
         fails_b4_alert: 1,
+        info_return_codes: [],
+        warning_return_codes: [],
+        run_interval: 0,
       },
+      scriptOptions: [],
       failOptions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
     };
   },
   computed: {
-    ...mapGetters(["scripts"]),
-    scriptOptions() {
-      const ret = [];
-      this.scripts.forEach(i => {
-        ret.push({ label: i.name, value: i.id });
-      });
-      return ret.sort((a, b) => a.label.localeCompare(b.label));
-    },
+    ...mapGetters(["showCommunityScripts"]),
   },
   methods: {
     getCheck() {
-      axios.get(`/checks/${this.checkpk}/check/`).then(r => {
-        this.scriptcheck = r.data;
-        this.scriptcheck.script = r.data.script.id;
-      });
+      this.$axios
+        .get(`/checks/${this.checkpk}/check/`)
+        .then(r => {
+          this.scriptcheck = r.data;
+          this.scriptcheck.script = r.data.script.id;
+        })
+        .catch(e => {});
     },
     addCheck() {
       const pk = this.policypk ? { policy: this.policypk } : { pk: this.agentpk };
@@ -127,37 +170,44 @@ export default {
         ...pk,
         check: this.scriptcheck,
       };
-      axios
+      this.$axios
         .post("/checks/checks/", data)
         .then(r => {
           this.$emit("close");
           this.reloadChecks();
           this.notifySuccess(r.data);
         })
-        .catch(e => this.notifyError(e.response.data.non_field_errors));
+        .catch(e => {});
     },
     editCheck() {
-      axios
+      this.$axios
         .patch(`/checks/${this.checkpk}/check/`, this.scriptcheck)
         .then(r => {
           this.$emit("close");
           this.reloadChecks();
           this.notifySuccess(r.data);
         })
-        .catch(e => this.notifyError(e.response.data.non_field_errors));
+        .catch(e => {});
+    },
+    setScriptDefaults() {
+      const script = this.scriptOptions.find(i => i.value === this.scriptcheck.script);
+
+      this.scriptcheck.timeout = script.timeout;
+      this.scriptcheck.script_args = script.args;
     },
     reloadChecks() {
-      if (this.policypk) {
-        this.$store.dispatch("automation/loadPolicyChecks", this.policypk);
-      } else {
+      if (this.agentpk) {
         this.$store.dispatch("loadChecks", this.agentpk);
       }
     },
+    validateRetcode(val, done) {
+      /^\d+$/.test(val) ? done(val) : done();
+    },
   },
-  created() {
-    if (this.mode === "edit") {
-      this.getCheck();
-    }
+  mounted() {
+    this.getScriptOptions(this.showCommunityScripts).then(options => (this.scriptOptions = Object.freeze(options)));
+
+    if (this.mode === "edit") this.getCheck();
   },
 };
 </script>

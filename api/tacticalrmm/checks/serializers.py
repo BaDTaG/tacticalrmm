@@ -1,10 +1,12 @@
+import pytz
 import validators as _v
-
 from rest_framework import serializers
 
-from .models import Check
 from autotasks.models import AutomatedTask
-from scripts.serializers import ScriptSerializer, ScriptCheckSerializer
+from scripts.serializers import ScriptCheckSerializer, ScriptSerializer
+
+from .models import Check, CheckHistory
+from scripts.models import Script
 
 
 class AssignedTaskField(serializers.ModelSerializer):
@@ -20,6 +22,23 @@ class CheckSerializer(serializers.ModelSerializer):
     assigned_task = serializers.SerializerMethodField()
     last_run = serializers.ReadOnlyField(source="last_run_as_timezone")
     history_info = serializers.ReadOnlyField()
+    alert_template = serializers.SerializerMethodField()
+
+    def get_alert_template(self, obj):
+        if obj.agent:
+            alert_template = obj.agent.alert_template
+        else:
+            alert_template = None
+
+        if not alert_template:
+            return None
+        else:
+            return {
+                "name": alert_template.name,
+                "always_email": alert_template.check_always_email,
+                "always_text": alert_template.check_always_text,
+                "always_alert": alert_template.check_always_alert,
+            }
 
     ## Change to return only array of tasks after 9/25/2020
     def get_assigned_task(self, obj):
@@ -40,19 +59,35 @@ class CheckSerializer(serializers.ModelSerializer):
             check_type = val["check_type"]
         except KeyError:
             return val
+
         # disk checks
         # make sure no duplicate diskchecks exist for an agent/policy
-        if check_type == "diskspace" and not self.instance:  # only on create
-            checks = (
-                Check.objects.filter(**self.context)
-                .filter(check_type="diskspace")
-                .exclude(managed_by_policy=True)
-            )
-            for check in checks:
-                if val["disk"] in check.disk:
-                    raise serializers.ValidationError(
-                        f"A disk check for Drive {val['disk']} already exists!"
-                    )
+        if check_type == "diskspace":
+            if not self.instance:  # only on create
+                checks = (
+                    Check.objects.filter(**self.context)
+                    .filter(check_type="diskspace")
+                    .exclude(managed_by_policy=True)
+                )
+                for check in checks:
+                    if val["disk"] in check.disk:
+                        raise serializers.ValidationError(
+                            f"A disk check for Drive {val['disk']} already exists!"
+                        )
+
+            if not val["warning_threshold"] and not val["error_threshold"]:
+                raise serializers.ValidationError(
+                    f"Warning threshold or Error Threshold must be set"
+                )
+
+            if (
+                val["warning_threshold"] < val["error_threshold"]
+                and val["warning_threshold"] > 0
+                and val["error_threshold"] > 0
+            ):
+                raise serializers.ValidationError(
+                    f"Warning threshold must be greater than Error Threshold"
+                )
 
         # ping checks
         if check_type == "ping":
@@ -65,6 +100,54 @@ class CheckSerializer(serializers.ModelSerializer):
                     "Please enter a valid IP address or domain name"
                 )
 
+        if check_type == "cpuload" and not self.instance:
+            if (
+                Check.objects.filter(**self.context, check_type="cpuload")
+                .exclude(managed_by_policy=True)
+                .exists()
+            ):
+                raise serializers.ValidationError(
+                    "A cpuload check for this agent already exists"
+                )
+
+            if not val["warning_threshold"] and not val["error_threshold"]:
+                raise serializers.ValidationError(
+                    f"Warning threshold or Error Threshold must be set"
+                )
+
+            if (
+                val["warning_threshold"] > val["error_threshold"]
+                and val["warning_threshold"] > 0
+                and val["error_threshold"] > 0
+            ):
+                raise serializers.ValidationError(
+                    f"Warning threshold must be less than Error Threshold"
+                )
+
+        if check_type == "memory" and not self.instance:
+            if (
+                Check.objects.filter(**self.context, check_type="memory")
+                .exclude(managed_by_policy=True)
+                .exists()
+            ):
+                raise serializers.ValidationError(
+                    "A memory check for this agent already exists"
+                )
+
+            if not val["warning_threshold"] and not val["error_threshold"]:
+                raise serializers.ValidationError(
+                    f"Warning threshold or Error Threshold must be set"
+                )
+
+            if (
+                val["warning_threshold"] > val["error_threshold"]
+                and val["warning_threshold"] > 0
+                and val["error_threshold"] > 0
+            ):
+                raise serializers.ValidationError(
+                    f"Warning threshold must be less than Error Threshold"
+                )
+
         return val
 
 
@@ -75,108 +158,17 @@ class AssignedTaskCheckRunnerField(serializers.ModelSerializer):
 
 
 class CheckRunnerGetSerializer(serializers.ModelSerializer):
-    # for the windows agent
     # only send data needed for agent to run a check
-
-    assigned_task = serializers.SerializerMethodField()
-    script = ScriptSerializer(read_only=True)
-
-    def get_assigned_task(self, obj):
-        if obj.assignedtask.exists():
-            # this will not break agents on version 0.10.2 or lower
-            # newer agents once released will properly handle multiple tasks assigned to a check
-            task = obj.assignedtask.first()
-            return AssignedTaskCheckRunnerField(task).data
-
-    class Meta:
-        model = Check
-        exclude = [
-            "policy",
-            "managed_by_policy",
-            "overriden_by_policy",
-            "parent_check",
-            "name",
-            "more_info",
-            "last_run",
-            "email_alert",
-            "text_alert",
-            "fails_b4_alert",
-            "fail_count",
-            "email_sent",
-            "text_sent",
-            "outage_history",
-            "extra_details",
-            "stdout",
-            "stderr",
-            "retcode",
-            "execution_time",
-            "svc_display_name",
-            "svc_policy_mode",
-            "created_by",
-            "created_time",
-            "modified_by",
-            "modified_time",
-            "history",
-        ]
-
-
-class CheckRunnerGetSerializerV2(serializers.ModelSerializer):
-    # for the windows __python__ agent
-    # only send data needed for agent to run a check
-
-    assigned_tasks = serializers.SerializerMethodField()
-    script = ScriptSerializer(read_only=True)
-
-    def get_assigned_tasks(self, obj):
-        if obj.assignedtask.exists():
-            tasks = obj.assignedtask.all()
-            return AssignedTaskCheckRunnerField(tasks, many=True).data
-
-    class Meta:
-        model = Check
-        exclude = [
-            "policy",
-            "managed_by_policy",
-            "overriden_by_policy",
-            "parent_check",
-            "name",
-            "more_info",
-            "last_run",
-            "email_alert",
-            "text_alert",
-            "fails_b4_alert",
-            "fail_count",
-            "email_sent",
-            "text_sent",
-            "outage_history",
-            "extra_details",
-            "stdout",
-            "stderr",
-            "retcode",
-            "execution_time",
-            "svc_display_name",
-            "svc_policy_mode",
-            "created_by",
-            "created_time",
-            "modified_by",
-            "modified_time",
-            "history",
-        ]
-
-
-class CheckRunnerGetSerializerV3(serializers.ModelSerializer):
-    # for the windows __golang__ agent
-    # only send data needed for agent to run a check
-    # the difference here is in the script serializer
-    # script checks no longer rely on salt and are executed directly by the go agent
-
-    assigned_tasks = serializers.SerializerMethodField()
     script = ScriptCheckSerializer(read_only=True)
+    script_args = serializers.SerializerMethodField()
 
-    def get_assigned_tasks(self, obj):
-        if obj.assignedtask.exists():
-            tasks = obj.assignedtask.all()
-            return AssignedTaskCheckRunnerField(tasks, many=True).data
+    def get_script_args(self, obj):
+        if obj.check_type != "script":
+            return []
+
+        return Script.parse_script_args(
+            agent=obj.agent, shell=obj.script.shell, args=obj.script_args
+        )
 
     class Meta:
         model = Check
@@ -192,8 +184,6 @@ class CheckRunnerGetSerializerV3(serializers.ModelSerializer):
             "text_alert",
             "fails_b4_alert",
             "fail_count",
-            "email_sent",
-            "text_sent",
             "outage_history",
             "extra_details",
             "stdout",
@@ -207,6 +197,7 @@ class CheckRunnerGetSerializerV3(serializers.ModelSerializer):
             "modified_by",
             "modified_time",
             "history",
+            "dashboard_alert",
         ]
 
 
@@ -217,3 +208,15 @@ class CheckResultsSerializer(serializers.ModelSerializer):
     class Meta:
         model = Check
         fields = "__all__"
+
+
+class CheckHistorySerializer(serializers.ModelSerializer):
+    x = serializers.SerializerMethodField()
+
+    def get_x(self, obj):
+        return obj.x.astimezone(pytz.timezone(self.context["timezone"])).isoformat()
+
+    # used for return large amounts of graph data
+    class Meta:
+        model = CheckHistory
+        fields = ("x", "y", "results")

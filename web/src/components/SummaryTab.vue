@@ -1,9 +1,10 @@
 <template>
   <div v-if="Object.keys(summary).length === 0">No agent selected</div>
   <div v-else>
+    <q-btn class="q-mr-sm" dense flat push icon="refresh" @click="refreshSummary" />
     <span>
       <b>{{ summary.hostname }}</b>
-      <span v-if="summary.maintenance_mode"> &bull; <q-badge color="warning"> Maintenance Mode </q-badge> </span>
+      <span v-if="summary.maintenance_mode"> &bull; <q-badge color="green"> Maintenance Mode </q-badge> </span>
       &bull; {{ summary.operating_system }} &bull; Agent v{{ summary.version }}
     </span>
     <hr />
@@ -38,6 +39,13 @@
             </q-item-section>
             <q-item-section>{{ disk }}</q-item-section>
           </q-item>
+          <!-- graphics -->
+          <q-item>
+            <q-item-section avatar>
+              <q-icon name="fas fa-tv" />
+            </q-item-section>
+            <q-item-section>{{ summary.graphics }}</q-item-section>
+          </q-item>
           <q-item>
             <q-item-section avatar>
               <q-icon name="fas fa-globe-americas" />
@@ -64,7 +72,24 @@
             <q-avatar size="lg" square icon="cancel" color="red" text-color="white" />
             <small>{{ summary.checks.failing }} checks failing</small>
           </q-chip>
-          <span v-if="awaitingSync(summary.checks.total, summary.checks.passing, summary.checks.failing)"
+          <q-chip v-if="summary.checks.warning" square size="lg">
+            <q-avatar size="lg" square icon="warning" color="warning" text-color="white" />
+            <small>{{ summary.checks.warning }} checks warning</small>
+          </q-chip>
+          <q-chip v-if="summary.checks.info" square size="lg">
+            <q-avatar size="lg" square icon="info" color="info" text-color="white" />
+            <small>{{ summary.checks.info }} checks info</small>
+          </q-chip>
+          <span
+            v-if="
+              awaitingSync(
+                summary.checks.total,
+                summary.checks.passing,
+                summary.checks.failing,
+                summary.checks.warning,
+                summary.checks.info
+              )
+            "
             >{{ summary.checks.total }} checks awaiting first synchronization</span
           >
         </template>
@@ -87,17 +112,34 @@
 </template>
 
 <script>
+import { mapGetters } from "vuex";
+import mixins from "@/mixins/mixins";
+
 export default {
   name: "SummaryTab",
+  mixins: [mixins],
   data() {
     return {};
   },
   methods: {
-    awaitingSync(total, passing, failing) {
-      return total !== 0 && passing === 0 && failing === 0 ? true : false;
+    awaitingSync(total, passing, failing, warning, info) {
+      return total !== 0 && passing === 0 && failing === 0 && warning === 0 && info === 0;
+    },
+    refreshSummary() {
+      this.$q.loading.show();
+      this.$axios
+        .get(`/agents/${this.selectedAgentPk}/wmi/`)
+        .then(r => {
+          this.$store.dispatch("loadSummary", this.selectedAgentPk);
+          this.$q.loading.hide();
+        })
+        .catch(e => {
+          this.$q.loading.hide();
+        });
     },
   },
   computed: {
+    ...mapGetters(["selectedAgentPk"]),
     summary() {
       return this.$store.state.agentSummary;
     },

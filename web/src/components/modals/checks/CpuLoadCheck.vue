@@ -11,13 +11,19 @@
       <q-card-section>
         <q-input
           outlined
-          v-model.number="cpuloadcheck.threshold"
-          label="Threshold (%)"
-          :rules="[ 
-                    val => !!val || '*Required',
-                    val => val >= 1 || 'Minimum threshold is 1',
-                    val => val < 100 || 'Maximum threshold is 99'
-                ]"
+          type="number"
+          v-model.number="cpuloadcheck.warning_threshold"
+          label="Warning Threshold (%)"
+          :rules="[val => val >= 0 || 'Minimum threshold is 0', val => val < 100 || 'Maximum threshold is 99']"
+        />
+      </q-card-section>
+      <q-card-section>
+        <q-input
+          outlined
+          type="number"
+          v-model.number="cpuloadcheck.error_threshold"
+          label="Error Threshold (%)"
+          :rules="[val => val >= 0 || 'Minimum threshold is 0', val => val < 100 || 'Maximum threshold is 99']"
         />
       </q-card-section>
       <q-card-section>
@@ -30,6 +36,16 @@
           label="Number of consecutive failures before alert"
         />
       </q-card-section>
+      <q-card-section>
+        <q-input
+          dense
+          outlined
+          type="number"
+          v-model.number="cpuloadcheck.run_interval"
+          label="Run this check every (seconds)"
+          hint="Setting this value to anything other than 0 will override the 'Run checks every' setting on the agent"
+        />
+      </q-card-section>
       <q-card-actions align="right">
         <q-btn v-if="mode === 'add'" label="Add" color="primary" type="submit" />
         <q-btn v-else-if="mode === 'edit'" label="Edit" color="primary" type="submit" />
@@ -40,10 +56,10 @@
 </template>
 
 <script>
-import axios from "axios";
 import mixins from "@/mixins/mixins";
 export default {
   name: "CpuLoadCheck",
+  emits: ["close"],
   props: {
     agentpk: Number,
     policypk: Number,
@@ -55,7 +71,9 @@ export default {
     return {
       cpuloadcheck: {
         check_type: "cpuload",
-        threshold: 85,
+        warning_threshold: 70,
+        error_threshold: 90,
+        run_interval: 0,
         fails_b4_alert: 1,
       },
       failOptions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
@@ -63,42 +81,51 @@ export default {
   },
   methods: {
     getCheck() {
-      axios.get(`/checks/${this.checkpk}/check/`).then(r => (this.cpuloadcheck = r.data));
+      this.$axios
+        .get(`/checks/${this.checkpk}/check/`)
+        .then(r => (this.cpuloadcheck = r.data))
+        .catch(e => {});
     },
     addCheck() {
+      if (!this.isValidThreshold(this.cpuloadcheck.warning_threshold, this.cpuloadcheck.error_threshold)) {
+        return;
+      }
+
       const pk = this.policypk ? { policy: this.policypk } : { pk: this.agentpk };
       const data = {
         ...pk,
         check: this.cpuloadcheck,
       };
-      axios
+      this.$axios
         .post("/checks/checks/", data)
         .then(r => {
           this.$emit("close");
           this.reloadChecks();
           this.notifySuccess(r.data);
         })
-        .catch(e => this.notifyError(e.response.data.non_field_errors));
+        .catch(e => {});
     },
     editCheck() {
-      axios
+      if (!this.isValidThreshold(this.cpuloadcheck.warning_threshold, this.cpuloadcheck.error_threshold)) {
+        return;
+      }
+
+      this.$axios
         .patch(`/checks/${this.checkpk}/check/`, this.cpuloadcheck)
         .then(r => {
           this.$emit("close");
           this.reloadChecks();
           this.notifySuccess(r.data);
         })
-        .catch(e => this.notifyError(e.response.data.non_field_errors));
+        .catch(e => {});
     },
     reloadChecks() {
-      if (this.policypk) {
-        this.$store.dispatch("automation/loadPolicyChecks", this.policypk);
-      } else {
+      if (this.agentpk) {
         this.$store.dispatch("loadChecks", this.agentpk);
       }
     },
   },
-  created() {
+  mounted() {
     if (this.mode === "edit") {
       this.getCheck();
     }

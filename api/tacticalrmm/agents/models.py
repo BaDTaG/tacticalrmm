@@ -1,28 +1,26 @@
-import requests
-import datetime as dt
-import time
+import asyncio
 import base64
-from Crypto.Cipher import AES
-from Crypto.Random import get_random_bytes
-from Crypto.Hash import SHA3_384
-from Crypto.Util.Padding import pad
-import validators
-import msgpack
-import random
 import re
-import string
+import time
 from collections import Counter
-from loguru import logger
-from packaging import version as pyver
 from distutils.version import LooseVersion
+from typing import Any
+
+import msgpack
+import validators
+from Crypto.Cipher import AES
+from Crypto.Hash import SHA3_384
+from Crypto.Random import get_random_bytes
+from Crypto.Util.Padding import pad
+from django.conf import settings
+from django.contrib.postgres.fields import ArrayField
+from django.db import models
+from django.utils import timezone as djangotime
+from loguru import logger
 from nats.aio.client import Client as NATS
 from nats.aio.errors import ErrTimeout
 
-from django.db import models
-from django.conf import settings
-from django.utils import timezone as djangotime
-
-from core.models import CoreSettings, TZ_CHOICES
+from core.models import TZ_CHOICES, CoreSettings
 from logs.models import BaseAuditModel
 
 logger.configure(**settings.LOG_CONFIG)
@@ -53,6 +51,8 @@ class Agent(BaseAuditModel):
     mesh_node_id = models.CharField(null=True, blank=True, max_length=255)
     overdue_email_alert = models.BooleanField(default=False)
     overdue_text_alert = models.BooleanField(default=False)
+    overdue_dashboard_alert = models.BooleanField(default=False)
+    offline_time = models.PositiveIntegerField(default=4)
     overdue_time = models.PositiveIntegerField(default=30)
     check_interval = models.PositiveIntegerField(default=120)
     needs_reboot = models.BooleanField(default=False)
@@ -63,6 +63,16 @@ class Agent(BaseAuditModel):
         max_length=255, choices=TZ_CHOICES, null=True, blank=True
     )
     maintenance_mode = models.BooleanField(default=False)
+    block_policy_inheritance = models.BooleanField(default=False)
+    pending_actions_count = models.PositiveIntegerField(default=0)
+    has_patches_pending = models.BooleanField(default=False)
+    alert_template = models.ForeignKey(
+        "alerts.AlertTemplate",
+        related_name="agents",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+    )
     site = models.ForeignKey(
         "clients.Site",
         related_name="agents",
@@ -78,16 +88,32 @@ class Agent(BaseAuditModel):
         on_delete=models.SET_NULL,
     )
 
+    def save(self, *args, **kwargs):
+
+        # get old agent if exists
+        old_agent = type(self).objects.get(pk=self.pk) if self.pk else None
+        super(BaseAuditModel, self).save(*args, **kwargs)
+
+        # check if new agent has been created
+        # or check if policy have changed on agent
+        # or if site has changed on agent and if so generate-policies
+        # or if agent was changed from server or workstation
+        if (
+            not old_agent
+            or (old_agent and old_agent.policy != self.policy)
+            or (old_agent.site != self.site)
+            or (old_agent.monitoring_type != self.monitoring_type)
+            or (old_agent.block_policy_inheritance != self.block_policy_inheritance)
+        ):
+            self.generate_checks_from_policies()
+            self.generate_tasks_from_policies()
+
     def __str__(self):
         return self.hostname
 
     @property
     def client(self):
         return self.site.client
-
-    @property
-    def has_nats(self):
-        return pyver.parse(self.version) >= pyver.parse("1.1.0")
 
     @property
     def timezone(self):
@@ -117,14 +143,6 @@ class Agent(BaseAuditModel):
         return None
 
     @property
-    def winsalt_dl(self):
-        if self.arch == "64":
-            return settings.SALT_64
-        elif self.arch == "32":
-            return settings.SALT_32
-        return None
-
-    @property
     def win_inno_exe(self):
         if self.arch == "64":
             return f"winagent-v{settings.LATEST_AGENT_VER}.exe"
@@ -134,7 +152,7 @@ class Agent(BaseAuditModel):
 
     @property
     def status(self):
-        offline = djangotime.now() - djangotime.timedelta(minutes=6)
+        offline = djangotime.now() - djangotime.timedelta(minutes=self.offline_time)
         overdue = djangotime.now() - djangotime.timedelta(minutes=self.overdue_time)
 
         if self.last_seen is not None:
@@ -148,28 +166,29 @@ class Agent(BaseAuditModel):
             return "offline"
 
     @property
-    def has_patches_pending(self):
-        return self.winupdates.filter(action="approve").filter(installed=False).exists()
-
-    @property
     def checks(self):
-        total, passing, failing = 0, 0, 0
+        total, passing, failing, warning, info = 0, 0, 0, 0, 0
 
-        if self.agentchecks.exists():
-            for i in self.agentchecks.all():
+        if self.agentchecks.exists():  # type: ignore
+            for i in self.agentchecks.all():  # type: ignore
                 total += 1
                 if i.status == "passing":
                     passing += 1
                 elif i.status == "failing":
-                    failing += 1
-
-        has_failing_checks = True if failing > 0 else False
+                    if i.alert_severity == "error":
+                        failing += 1
+                    elif i.alert_severity == "warning":
+                        warning += 1
+                    elif i.alert_severity == "info":
+                        info += 1
 
         ret = {
             "total": total,
             "passing": passing,
             "failing": failing,
-            "has_failing_checks": has_failing_checks,
+            "warning": warning,
+            "info": info,
+            "has_failing_checks": failing > 0 or warning > 0,
         }
         return ret
 
@@ -183,6 +202,27 @@ class Agent(BaseAuditModel):
             return ret
         except:
             return ["unknown cpu model"]
+
+    @property
+    def graphics(self):
+        ret, mrda = [], []
+        try:
+            graphics = self.wmi_detail["graphics"]
+            for i in graphics:
+                caption = [x["Caption"] for x in i if "Caption" in x][0]
+                if "microsoft remote display adapter" in caption.lower():
+                    mrda.append("yes")
+                    continue
+
+                ret.append([x["Caption"] for x in i if "Caption" in x][0])
+
+            # only return this if no other graphics cards
+            if not ret and mrda:
+                return "Microsoft Remote Display Adapter"
+
+            return ", ".join(ret)
+        except:
+            return "Graphics info requires agent v1.4.14"
 
     @property
     def local_ips(self):
@@ -223,11 +263,17 @@ class Agent(BaseAuditModel):
                 make = [x["Manufacturer"] for x in mobo if "Manufacturer" in x][0]
                 model = [x["Product"] for x in mobo if "Product" in x][0]
 
+            if make.lower() == "lenovo":
+                sysfam = [x["SystemFamily"] for x in comp_sys if "SystemFamily" in x][0]
+                if "to be filled" not in sysfam.lower():
+                    model = sysfam
+
             return f"{make} {model}"
         except:
             pass
 
         try:
+            comp_sys_prod = self.wmi_detail["comp_sys_prod"][0]
             return [x["Version"] for x in comp_sys_prod if "Version" in x][0]
         except:
             pass
@@ -257,33 +303,107 @@ class Agent(BaseAuditModel):
         except:
             return ["unknown disk"]
 
+    def check_run_interval(self) -> int:
+        interval = self.check_interval
+        # determine if any agent checks have a custom interval and set the lowest interval
+        for check in self.agentchecks.filter(overriden_by_policy=False):  # type: ignore
+            if check.run_interval and check.run_interval < interval:
+
+                # don't allow check runs less than 15s
+                if check.run_interval < 15:
+                    interval = 15
+                else:
+                    interval = check.run_interval
+
+        return interval
+
+    def run_script(
+        self,
+        scriptpk: int,
+        args: list[str] = [],
+        timeout: int = 120,
+        full: bool = False,
+        wait: bool = False,
+        run_on_any: bool = False,
+    ) -> Any:
+
+        from scripts.models import Script
+
+        script = Script.objects.get(pk=scriptpk)
+
+        parsed_args = script.parse_script_args(self, script.shell, args)
+
+        data = {
+            "func": "runscriptfull" if full else "runscript",
+            "timeout": timeout,
+            "script_args": parsed_args,
+            "payload": {
+                "code": script.code,
+                "shell": script.shell,
+            },
+        }
+
+        running_agent = self
+        if run_on_any:
+            nats_ping = {"func": "ping"}
+
+            # try on self first
+            r = asyncio.run(self.nats_cmd(nats_ping, timeout=1))
+
+            if r == "pong":
+                running_agent = self
+            else:
+                online = [
+                    agent
+                    for agent in Agent.objects.only(
+                        "pk", "agent_id", "last_seen", "overdue_time", "offline_time"
+                    )
+                    if agent.status == "online"
+                ]
+
+                for agent in online:
+                    r = asyncio.run(agent.nats_cmd(nats_ping, timeout=1))
+                    if r == "pong":
+                        running_agent = agent
+                        break
+
+                if running_agent.pk == self.pk:
+                    return "Unable to find an online agent"
+
+        if wait:
+            return asyncio.run(running_agent.nats_cmd(data, timeout=timeout, wait=True))
+        else:
+            asyncio.run(running_agent.nats_cmd(data, wait=False))
+
+        return "ok"
+
     # auto approves updates
     def approve_updates(self):
         patch_policy = self.get_patch_policy()
 
         updates = list()
         if patch_policy.critical == "approve":
-            updates += self.winupdates.filter(
+            updates += self.winupdates.filter(  # type: ignore
                 severity="Critical", installed=False
             ).exclude(action="approve")
 
         if patch_policy.important == "approve":
-            updates += self.winupdates.filter(
+            updates += self.winupdates.filter(  # type: ignore
                 severity="Important", installed=False
             ).exclude(action="approve")
 
         if patch_policy.moderate == "approve":
-            updates += self.winupdates.filter(
+            updates += self.winupdates.filter(  # type: ignore
                 severity="Moderate", installed=False
             ).exclude(action="approve")
 
         if patch_policy.low == "approve":
-            updates += self.winupdates.filter(severity="Low", installed=False).exclude(
+            updates += self.winupdates.filter(severity="Low", installed=False).exclude(  # type: ignore
                 action="approve"
             )
 
         if patch_policy.other == "approve":
-            updates += self.winupdates.filter(severity="", installed=False).exclude(
+            updates += self.winupdates.filter(severity="", installed=False).exclude(  # type: ignore
                 action="approve"
             )
 
@@ -298,7 +418,7 @@ class Agent(BaseAuditModel):
         site = self.site
         core_settings = CoreSettings.objects.first()
         patch_policy = None
-        agent_policy = self.winupdatepolicy.get()
+        agent_policy = self.winupdatepolicy.get()  # type: ignore
 
         if self.monitoring_type == "server":
             # check agent policy first which should override client or site policy
@@ -307,21 +427,34 @@ class Agent(BaseAuditModel):
 
             # check site policy if agent policy doesn't have one
             elif site.server_policy and site.server_policy.winupdatepolicy.exists():
-                patch_policy = site.server_policy.winupdatepolicy.get()
+                # make sure agent isn;t blocking policy inheritance
+                if not self.block_policy_inheritance:
+                    patch_policy = site.server_policy.winupdatepolicy.get()
 
             # if site doesn't have a patch policy check the client
             elif (
                 site.client.server_policy
                 and site.client.server_policy.winupdatepolicy.exists()
             ):
-                patch_policy = site.client.server_policy.winupdatepolicy.get()
+                # make sure agent and site are not blocking inheritance
+                if (
+                    not self.block_policy_inheritance
+                    and not site.block_policy_inheritance
+                ):
+                    patch_policy = site.client.server_policy.winupdatepolicy.get()
 
             # if patch policy still doesn't exist check default policy
             elif (
                 core_settings.server_policy
                 and core_settings.server_policy.winupdatepolicy.exists()
             ):
-                patch_policy = core_settings.server_policy.winupdatepolicy.get()
+                # make sure agent site and client are not blocking inheritance
+                if (
+                    not self.block_policy_inheritance
+                    and not site.block_policy_inheritance
+                    and not site.client.block_policy_inheritance
+                ):
+                    patch_policy = core_settings.server_policy.winupdatepolicy.get()
 
         elif self.monitoring_type == "workstation":
             # check agent policy first which should override client or site policy
@@ -332,21 +465,36 @@ class Agent(BaseAuditModel):
                 site.workstation_policy
                 and site.workstation_policy.winupdatepolicy.exists()
             ):
-                patch_policy = site.workstation_policy.winupdatepolicy.get()
+                # make sure agent isn;t blocking policy inheritance
+                if not self.block_policy_inheritance:
+                    patch_policy = site.workstation_policy.winupdatepolicy.get()
 
             # if site doesn't have a patch policy check the client
             elif (
                 site.client.workstation_policy
                 and site.client.workstation_policy.winupdatepolicy.exists()
             ):
-                patch_policy = site.client.workstation_policy.winupdatepolicy.get()
+                # make sure agent and site are not blocking inheritance
+                if (
+                    not self.block_policy_inheritance
+                    and not site.block_policy_inheritance
+                ):
+                    patch_policy = site.client.workstation_policy.winupdatepolicy.get()
 
             # if patch policy still doesn't exist check default policy
             elif (
                 core_settings.workstation_policy
                 and core_settings.workstation_policy.winupdatepolicy.exists()
             ):
-                patch_policy = core_settings.workstation_policy.winupdatepolicy.get()
+                # make sure agent site and client are not blocking inheritance
+                if (
+                    not self.block_policy_inheritance
+                    and not site.block_policy_inheritance
+                    and not site.client.block_policy_inheritance
+                ):
+                    patch_policy = (
+                        core_settings.workstation_policy.winupdatepolicy.get()
+                    )
 
         # if policy still doesn't exist return the agent patch policy
         if not patch_policy:
@@ -383,31 +531,161 @@ class Agent(BaseAuditModel):
 
         return patch_policy
 
-    # clear is used to delete managed policy checks from agent
-    # parent_checks specifies a list of checks to delete from agent with matching parent_check field
-    def generate_checks_from_policies(self, clear=False):
+    def get_approved_update_guids(self) -> list[str]:
+        return list(
+            self.winupdates.filter(action="approve", installed=False).values_list(  # type: ignore
+                "guid", flat=True
+            )
+        )
+
+    # sets alert template assigned in the following order: policy, site, client, global
+    # sets None if nothing is found
+    def set_alert_template(self):
+
+        site = self.site
+        client = self.client
+        core = CoreSettings.objects.first()
+
+        templates = list()
+        # check if alert template is on a policy assigned to agent
+        if (
+            self.policy
+            and self.policy.alert_template
+            and self.policy.alert_template.is_active
+        ):
+            templates.append(self.policy.alert_template)
+
+        # check if policy with alert template is assigned to the site
+        if (
+            self.monitoring_type == "server"
+            and site.server_policy
+            and site.server_policy.alert_template
+            and site.server_policy.alert_template.is_active
+            and not self.block_policy_inheritance
+        ):
+            templates.append(site.server_policy.alert_template)
+        if (
+            self.monitoring_type == "workstation"
+            and site.workstation_policy
+            and site.workstation_policy.alert_template
+            and site.workstation_policy.alert_template.is_active
+            and not self.block_policy_inheritance
+        ):
+            templates.append(site.workstation_policy.alert_template)
+
+        # check if alert template is assigned to site
+        if site.alert_template and site.alert_template.is_active:
+            templates.append(site.alert_template)
+
+        # check if policy with alert template is assigned to the client
+        if (
+            self.monitoring_type == "server"
+            and client.server_policy
+            and client.server_policy.alert_template
+            and client.server_policy.alert_template.is_active
+            and not self.block_policy_inheritance
+            and not site.block_policy_inheritance
+        ):
+            templates.append(client.server_policy.alert_template)
+        if (
+            self.monitoring_type == "workstation"
+            and client.workstation_policy
+            and client.workstation_policy.alert_template
+            and client.workstation_policy.alert_template.is_active
+            and not self.block_policy_inheritance
+            and not site.block_policy_inheritance
+        ):
+            templates.append(client.workstation_policy.alert_template)
+
+        # check if alert template is on client and return
+        if (
+            client.alert_template
+            and client.alert_template.is_active
+            and not self.block_policy_inheritance
+            and not site.block_policy_inheritance
+        ):
+            templates.append(client.alert_template)
+
+        # check if alert template is applied globally and return
+        if (
+            core.alert_template
+            and core.alert_template.is_active
+            and not self.block_policy_inheritance
+            and not site.block_policy_inheritance
+            and not client.block_policy_inheritance
+        ):
+            templates.append(core.alert_template)
+
+        # if agent is a workstation, check if policy with alert template is assigned to the site, client, or core
+        if (
+            self.monitoring_type == "server"
+            and core.server_policy
+            and core.server_policy.alert_template
+            and core.server_policy.alert_template.is_active
+            and not self.block_policy_inheritance
+            and not site.block_policy_inheritance
+            and not client.block_policy_inheritance
+        ):
+            templates.append(core.server_policy.alert_template)
+        if (
+            self.monitoring_type == "workstation"
+            and core.workstation_policy
+            and core.workstation_policy.alert_template
+            and core.workstation_policy.alert_template.is_active
+            and not self.block_policy_inheritance
+            and not site.block_policy_inheritance
+            and not client.block_policy_inheritance
+        ):
+            templates.append(core.workstation_policy.alert_template)
+
+        # go through the templates and return the first one that isn't excluded
+        for template in templates:
+            # check if client, site, or agent has been excluded from template
+            if (
+                client.pk
+                in template.excluded_clients.all().values_list("pk", flat=True)
+                or site.pk in template.excluded_sites.all().values_list("pk", flat=True)
+                or self.pk
+                in template.excluded_agents.all()
+                .only("pk")
+                .values_list("pk", flat=True)
+            ):
+                continue
+
+            # check if template is excluding desktops
+            elif (
+                self.monitoring_type == "workstation" and template.exclude_workstations
+            ):
+                continue
+
+            # check if template is excluding servers
+            elif self.monitoring_type == "server" and template.exclude_servers:
+                continue
+
+            else:
+                # save alert_template to agent cache field
+                self.alert_template = template
+                self.save()
+
+                return template
+
+        # no alert templates found or agent has been excluded
+        self.alert_template = None
+        self.save()
+
+        return None
+
+    def generate_checks_from_policies(self):
         from automation.models import Policy
 
-        # Clear agent checks managed by policy
-        if clear:
-            self.agentchecks.filter(managed_by_policy=True).delete()
-
         # Clear agent checks that have overriden_by_policy set
-        self.agentchecks.update(overriden_by_policy=False)
+        self.agentchecks.update(overriden_by_policy=False)  # type: ignore
 
         # Generate checks based on policies
         Policy.generate_policy_checks(self)
 
-    # clear is used to delete managed policy tasks from agent
-    # parent_tasks specifies a list of tasks to delete from agent with matching parent_task field
-    def generate_tasks_from_policies(self, clear=False):
-        from autotasks.tasks import delete_win_task_schedule
+    def generate_tasks_from_policies(self):
         from automation.models import Policy
-
-        # Clear agent tasks managed by policy
-        if clear:
-            for task in self.autotasks.filter(managed_by_policy=True):
-                delete_win_task_schedule.delay(task.pk)
 
         # Generate tasks based on policies
         Policy.generate_policy_tasks(self)
@@ -436,7 +714,7 @@ class Agent(BaseAuditModel):
         except Exception:
             return "err"
 
-    async def nats_cmd(self, data, timeout=30, wait=True):
+    async def nats_cmd(self, data: dict, timeout: int = 30, wait: bool = True):
         nc = NATS()
         options = {
             "servers": f"tls://{settings.ALLOWED_HOSTS[0]}:4222",
@@ -458,7 +736,11 @@ class Agent(BaseAuditModel):
             except ErrTimeout:
                 ret = "timeout"
             else:
-                ret = msgpack.loads(msg.data)
+                try:
+                    ret = msgpack.loads(msg.data)  # type: ignore
+                except Exception as e:
+                    logger.error(e)
+                    ret = str(e)
 
             await nc.close()
             return ret
@@ -467,77 +749,6 @@ class Agent(BaseAuditModel):
             await nc.flush()
             await nc.close()
 
-    def salt_api_cmd(self, **kwargs):
-
-        # salt should always timeout first before the requests' timeout
-        try:
-            timeout = kwargs["timeout"]
-        except KeyError:
-            # default timeout
-            timeout = 15
-            salt_timeout = 12
-        else:
-            if timeout < 8:
-                timeout = 8
-                salt_timeout = 5
-            else:
-                salt_timeout = timeout - 3
-
-        json = {
-            "client": "local",
-            "tgt": self.salt_id,
-            "fun": kwargs["func"],
-            "timeout": salt_timeout,
-            "username": settings.SALT_USERNAME,
-            "password": settings.SALT_PASSWORD,
-            "eauth": "pam",
-        }
-
-        if "arg" in kwargs:
-            json.update({"arg": kwargs["arg"]})
-        if "kwargs" in kwargs:
-            json.update({"kwarg": kwargs["kwargs"]})
-
-        try:
-            resp = requests.post(
-                f"http://{settings.SALT_HOST}:8123/run",
-                json=[json],
-                timeout=timeout,
-            )
-        except Exception:
-            return "timeout"
-
-        try:
-            ret = resp.json()["return"][0][self.salt_id]
-        except Exception as e:
-            logger.error(f"{self.salt_id}: {e}")
-            return "error"
-        else:
-            return ret
-
-    def salt_api_async(self, **kwargs):
-
-        json = {
-            "client": "local_async",
-            "tgt": self.salt_id,
-            "fun": kwargs["func"],
-            "username": settings.SALT_USERNAME,
-            "password": settings.SALT_PASSWORD,
-            "eauth": "pam",
-        }
-
-        if "arg" in kwargs:
-            json.update({"arg": kwargs["arg"]})
-        if "kwargs" in kwargs:
-            json.update({"kwarg": kwargs["kwargs"]})
-
-        try:
-            resp = requests.post(f"http://{settings.SALT_HOST}:8123/run", json=[json])
-        except Exception:
-            return "timeout"
-
-        return resp
-
     @staticmethod
     def serialize(agent):
         # serializes the agent and returns json
@@ -545,98 +756,18 @@ class Agent(BaseAuditModel):
 
         ret = AgentEditSerializer(agent).data
         del ret["all_timezones"]
+        del ret["client"]
         return ret
-
-    @staticmethod
-    def salt_batch_async(**kwargs):
-        assert isinstance(kwargs["minions"], list)
-
-        json = {
-            "client": "local_async",
-            "tgt_type": "list",
-            "tgt": kwargs["minions"],
-            "fun": kwargs["func"],
-            "username": settings.SALT_USERNAME,
-            "password": settings.SALT_PASSWORD,
-            "eauth": "pam",
-        }
-
-        if "arg" in kwargs:
-            json.update({"arg": kwargs["arg"]})
-        if "kwargs" in kwargs:
-            json.update({"kwarg": kwargs["kwargs"]})
-
-        try:
-            resp = requests.post(f"http://{settings.SALT_HOST}:8123/run", json=[json])
-        except Exception:
-            return "timeout"
-
-        return resp
-
-    def schedule_reboot(self, obj):
-
-        start_date = dt.datetime.strftime(obj, "%Y-%m-%d")
-        start_time = dt.datetime.strftime(obj, "%H:%M")
-
-        # let windows task scheduler automatically delete the task after it runs
-        end_obj = obj + dt.timedelta(minutes=15)
-        end_date = dt.datetime.strftime(end_obj, "%Y-%m-%d")
-        end_time = dt.datetime.strftime(end_obj, "%H:%M")
-
-        task_name = "TacticalRMM_SchedReboot_" + "".join(
-            random.choice(string.ascii_letters) for _ in range(10)
-        )
-
-        r = self.salt_api_cmd(
-            timeout=15,
-            func="task.create_task",
-            arg=[
-                f"name={task_name}",
-                "force=True",
-                "action_type=Execute",
-                'cmd="C:\\Windows\\System32\\shutdown.exe"',
-                'arguments="/r /t 5 /f"',
-                "trigger_type=Once",
-                f'start_date="{start_date}"',
-                f'start_time="{start_time}"',
-                f'end_date="{end_date}"',
-                f'end_time="{end_time}"',
-                "ac_only=False",
-                "stop_if_on_batteries=False",
-                "delete_after=Immediately",
-            ],
-        )
-
-        if r == "error" or (isinstance(r, bool) and not r):
-            return "failed"
-        elif r == "timeout":
-            return "timeout"
-        elif isinstance(r, bool) and r:
-            from logs.models import PendingAction
-
-            details = {
-                "taskname": task_name,
-                "time": str(obj),
-            }
-            PendingAction(agent=self, action_type="schedreboot", details=details).save()
-
-            nice_time = dt.datetime.strftime(obj, "%B %d, %Y at %I:%M %p")
-            return {"msg": {"time": nice_time, "agent": self.hostname}}
-        else:
-            return "failed"
-
-    def not_supported(self, version_added):
-        return pyver.parse(self.version) < pyver.parse(version_added)
 
     def delete_superseded_updates(self):
         try:
             pks = []  # list of pks to delete
-            kbs = list(self.winupdates.values_list("kb", flat=True))
+            kbs = list(self.winupdates.values_list("kb", flat=True))  # type: ignore
             d = Counter(kbs)
             dupes = [k for k, v in d.items() if v > 1]
 
             for dupe in dupes:
-                titles = self.winupdates.filter(kb=dupe).values_list("title", flat=True)
+                titles = self.winupdates.filter(kb=dupe).values_list("title", flat=True)  # type: ignore
                 # extract the version from the title and sort from oldest to newest
                 # skip if no version info is available therefore nothing to parse
                 try:
@@ -649,69 +780,42 @@ class Agent(BaseAuditModel):
                     continue
                 # append all but the latest version to our list of pks to delete
                 for ver in sorted_vers[:-1]:
-                    q = self.winupdates.filter(kb=dupe).filter(title__contains=ver)
+                    q = self.winupdates.filter(kb=dupe).filter(title__contains=ver)  # type: ignore
                     pks.append(q.first().pk)
 
             pks = list(set(pks))
-            self.winupdates.filter(pk__in=pks).delete()
+            self.winupdates.filter(pk__in=pks).delete()  # type: ignore
         except:
             pass
 
-    # define how the agent should handle pending actions
-    def handle_pending_actions(self):
-        pending_actions = self.pendingactions.filter(status="pending")
-
-        for action in pending_actions:
-            if action.action_type == "taskaction":
-                from autotasks.tasks import (
-                    create_win_task_schedule,
-                    enable_or_disable_win_task,
-                    delete_win_task_schedule,
+    def should_create_alert(self, alert_template=None):
+        return (
+            self.overdue_dashboard_alert
+            or self.overdue_email_alert
+            or self.overdue_text_alert
+            or (
+                alert_template
+                and (
+                    alert_template.agent_always_alert
+                    or alert_template.agent_always_email
+                    or alert_template.agent_always_text
                 )
-
-                task_id = action.details["task_id"]
-
-                if action.details["action"] == "taskcreate":
-                    create_win_task_schedule.delay(task_id, pending_action=action.id)
-                elif action.details["action"] == "tasktoggle":
-                    enable_or_disable_win_task.delay(
-                        task_id, action.details["value"], pending_action=action.id
-                    )
-                elif action.details["action"] == "taskdelete":
-                    delete_win_task_schedule.delay(task_id, pending_action=action.id)
-
-
-class AgentOutage(models.Model):
-    agent = models.ForeignKey(
-        Agent,
-        related_name="agentoutages",
-        null=True,
-        blank=True,
-        on_delete=models.CASCADE,
-    )
-    outage_time = models.DateTimeField(auto_now_add=True)
-    recovery_time = models.DateTimeField(null=True, blank=True)
-    outage_email_sent = models.BooleanField(default=False)
-    outage_sms_sent = models.BooleanField(default=False)
-    recovery_email_sent = models.BooleanField(default=False)
-    recovery_sms_sent = models.BooleanField(default=False)
-
-    @property
-    def is_active(self):
-        return False if self.recovery_time else True
+            )
+        )
 
     def send_outage_email(self):
         from core.models import CoreSettings
 
         CORE = CoreSettings.objects.first()
         CORE.send_mail(
-            f"{self.agent.client.name}, {self.agent.site.name}, {self.agent.hostname} - data overdue",
+            f"{self.client.name}, {self.site.name}, {self.hostname} - data overdue",
             (
-                f"Data has not been received from client {self.agent.client.name}, "
-                f"site {self.agent.site.name}, "
-                f"agent {self.agent.hostname} "
+                f"Data has not been received from client {self.client.name}, "
+                f"site {self.site.name}, "
+                f"agent {self.hostname} "
                 "within the expected time."
             ),
+            alert_template=self.alert_template,
         )
 
     def send_recovery_email(self):
@@ -719,13 +823,14 @@ class AgentOutage(models.Model):
 
         CORE = CoreSettings.objects.first()
         CORE.send_mail(
-            f"{self.agent.client.name}, {self.agent.site.name}, {self.agent.hostname} - data received",
+            f"{self.client.name}, {self.site.name}, {self.hostname} - data received",
             (
-                f"Data has been received from client {self.agent.client.name}, "
-                f"site {self.agent.site.name}, "
-                f"agent {self.agent.hostname} "
+                f"Data has been received from client {self.client.name}, "
+                f"site {self.site.name}, "
+                f"agent {self.hostname} "
                 "after an interruption in data transmission."
             ),
+            alert_template=self.alert_template,
         )
 
     def send_outage_sms(self):
@@ -733,7 +838,8 @@ class AgentOutage(models.Model):
 
         CORE = CoreSettings.objects.first()
         CORE.send_sms(
-            f"{self.agent.client.name}, {self.agent.site.name}, {self.agent.hostname} - data overdue"
+            f"{self.client.name}, {self.site.name}, {self.hostname} - data overdue",
+            alert_template=self.alert_template,
         )
 
     def send_recovery_sms(self):
@@ -741,11 +847,9 @@ class AgentOutage(models.Model):
 
         CORE = CoreSettings.objects.first()
         CORE.send_sms(
-            f"{self.agent.client.name}, {self.agent.site.name}, {self.agent.hostname} - data received"
+            f"{self.client.name}, {self.site.name}, {self.hostname} - data received",
+            alert_template=self.alert_template,
         )
-
-    def __str__(self):
-        return self.agent.hostname
 
 
 RECOVERY_CHOICES = [
@@ -770,12 +874,6 @@ class RecoveryAction(models.Model):
     def __str__(self):
         return f"{self.agent.hostname} - {self.mode}"
 
-    def send(self):
-        ret = {"recovery": self.mode}
-        if self.mode == "command":
-            ret["cmd"] = self.command
-        return ret
-
 
 class Note(models.Model):
     agent = models.ForeignKey(
@@ -795,3 +893,38 @@ class Note(models.Model):
 
     def __str__(self):
         return self.agent.hostname
+
+
+class AgentCustomField(models.Model):
+    agent = models.ForeignKey(
+        Agent,
+        related_name="custom_fields",
+        on_delete=models.CASCADE,
+    )
+
+    field = models.ForeignKey(
+        "core.CustomField",
+        related_name="agent_fields",
+        on_delete=models.CASCADE,
+    )
+
+    string_value = models.TextField(null=True, blank=True)
+    bool_value = models.BooleanField(blank=True, default=False)
+    multiple_value = ArrayField(
+        models.TextField(null=True, blank=True),
+        null=True,
+        blank=True,
+        default=list,
+    )
+
+    def __str__(self):
+        return self.field
+
+    @property
+    def value(self):
+        if self.field.type == "multiple":
+            return self.multiple_value
+        elif self.field.type == "checkbox":
+            return self.bool_value
+        else:
+            return self.string_value

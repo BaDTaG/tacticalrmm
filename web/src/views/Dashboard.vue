@@ -8,17 +8,18 @@
       <q-toolbar>
         <q-btn dense flat push @click="refreshEntireSite" icon="refresh" />
         <q-toolbar-title>
-          Tactical RMM<span class="text-overline">&nbsp;&nbsp;&nbsp;v{{ currentTRMMVersion }}</span>
+          Tactical RMM<span class="text-overline q-ml-sm">v{{ currentTRMMVersion }}</span>
+          <span
+            class="text-overline q-ml-md"
+            v-if="latestTRMMVersion !== 'error' && currentTRMMVersion !== latestTRMMVersion"
+            ><q-badge color="warning"
+              ><a :href="latestReleaseURL" target="_blank">v{{ latestTRMMVersion }} available</a></q-badge
+            ></span
+          >
         </q-toolbar-title>
 
         <!-- temp dark mode toggle -->
-        <q-toggle
-          v-model="darkMode"
-          class="q-mr-sm"
-          @input="toggleDark(darkMode)"
-          checked-icon="nights_stay"
-          unchecked-icon="wb_sunny"
-        />
+        <q-toggle v-model="darkMode" class="q-mr-sm" checked-icon="nights_stay" unchecked-icon="wb_sunny" />
 
         <!-- Devices Chip -->
         <q-chip class="cursor-pointer">
@@ -69,10 +70,15 @@
           </q-menu>
         </q-chip>
 
-        <!--<AlertsIcon />-->
+        <AlertsIcon />
 
         <q-btn-dropdown flat no-caps stretch :label="user">
           <q-list>
+            <q-item clickable v-ripple @click="showUserPreferencesModal = true" v-close-popup>
+              <q-item-section>
+                <q-item-label>Preferences</q-item-label>
+              </q-item-section>
+            </q-item>
             <q-item to="/expired" exact>
               <q-item-section>
                 <q-item-label>Logout</q-item-label>
@@ -84,8 +90,8 @@
     </q-header>
 
     <q-page-container>
-      <FileBar :clients="clients" @edited="refreshEntireSite" />
-      <q-splitter v-model="outsideModel">
+      <FileBar />
+      <q-splitter v-model="clientTreeSplitter">
         <template v-slot:before>
           <div v-if="!treeReady" class="q-pa-sm q-gutter-sm text-center" style="height: 30vh">
             <q-spinner size="40px" color="primary" />
@@ -104,23 +110,25 @@
                 node-key="raw"
                 no-nodes-label="No Clients"
                 selected-color="primary"
-                :selected.sync="selectedTree"
+                v-model:selected="selectedTree"
                 @update:selected="loadFrame(selectedTree)"
               >
                 <template v-slot:default-header="props">
                   <div class="row">
                     <q-icon :name="props.node.icon" :color="props.node.color" class="q-mr-sm" />
-                    <span>{{ props.node.label }}</span>
+                    <span
+                      >{{ props.node.label }} <q-tooltip :delay="600">ID: {{ props.node.id }}</q-tooltip></span
+                    >
 
                     <q-menu context-menu>
                       <q-list dense style="min-width: 200px">
-                        <q-item clickable v-close-popup @click="showEditModal(props.node, 'edit')">
+                        <q-item clickable v-close-popup @click="showEditModal(props.node)">
                           <q-item-section side>
                             <q-icon name="edit" />
                           </q-item-section>
                           <q-item-section>Edit</q-item-section>
                         </q-item>
-                        <q-item clickable v-close-popup @click="showDeleteModal(props.node, 'delete')">
+                        <q-item clickable v-close-popup @click="showDeleteModal(props.node)">
                           <q-item-section side>
                             <q-icon name="delete" />
                           </q-item-section>
@@ -129,6 +137,18 @@
 
                         <q-separator></q-separator>
 
+                        <q-item
+                          v-if="props.node.children"
+                          clickable
+                          v-close-popup
+                          @click="showAddSiteModal(props.node)"
+                        >
+                          <q-item-section side>
+                            <q-icon name="add" />
+                          </q-item-section>
+                          <q-item-section>Add Site</q-item-section>
+                        </q-item>
+
                         <q-item clickable v-close-popup @click="showToggleMaintenance(props.node)">
                           <q-item-section side>
                             <q-icon name="construction" />
@@ -136,11 +156,30 @@
                           <q-item-section>{{ menuMaintenanceText(props.node) }}</q-item-section>
                         </q-item>
 
+                        <q-item
+                          v-if="props.node.children === undefined"
+                          clickable
+                          v-close-popup
+                          @click="showInstallAgent(props.node)"
+                        >
+                          <q-item-section side>
+                            <q-icon name="cloud_download" />
+                          </q-item-section>
+                          <q-item-section>Install Agent</q-item-section>
+                        </q-item>
+
                         <q-item clickable v-close-popup @click="showPolicyAdd(props.node)">
                           <q-item-section side>
                             <q-icon name="policy" />
                           </q-item-section>
-                          <q-item-section>Edit Policies</q-item-section>
+                          <q-item-section>Assign Automation Policy</q-item-section>
+                        </q-item>
+
+                        <q-item clickable v-close-popup @click="showAlertTemplateAdd(props.node)">
+                          <q-item-section side>
+                            <q-icon name="error" />
+                          </q-item-section>
+                          <q-item-section>Assign Alert Template</q-item-section>
                         </q-item>
 
                         <q-separator></q-separator>
@@ -158,7 +197,13 @@
         </template>
 
         <template v-slot:after>
-          <q-splitter v-model="innerModel" reverse horizontal style="height: 87vh" @input="setSplitter(innerModel)">
+          <q-splitter
+            v-model="innerModel"
+            reverse
+            horizontal
+            style="height: 87vh"
+            @update:model-value="setSplitter(innerModel)"
+          >
             <template v-slot:before>
               <div class="row">
                 <q-tabs
@@ -178,7 +223,6 @@
                 </q-tabs>
                 <q-space />
                 <q-input
-                  autogrow
                   v-model="search"
                   style="width: 450px"
                   label="Search"
@@ -214,6 +258,16 @@
 
                             <q-item-section>
                               <q-item-label>Patches Pending</q-item-label>
+                            </q-item-section>
+                          </q-item>
+
+                          <q-item>
+                            <q-item-section side>
+                              <q-checkbox v-model="filterActionsPending" />
+                            </q-item-section>
+
+                            <q-item-section>
+                              <q-item-label>Actions Pending</q-item-label>
                             </q-item-section>
                           </q-item>
 
@@ -285,56 +339,40 @@
                 </q-input>
               </div>
               <AgentTable
-                :frame="frame"
+                :frame="filteredAgents"
                 :columns="columns"
-                :tab="tab"
-                :filter="filteredAgents"
                 :userName="user"
                 :search="search"
                 :visibleColumns="visibleColumns"
-                @refreshEdit="refreshEntireSite"
+                @edit="refreshEntireSite"
               />
             </template>
             <template v-slot:separator>
               <q-avatar color="primary" text-color="white" size="30px" icon="drag_indicator" />
             </template>
             <template v-slot:after>
-              <SubTableTabs />
+              <SubTableTabs @edit="refreshEntireSite" />
             </template>
           </q-splitter>
         </template>
       </q-splitter>
     </q-page-container>
 
-    <!-- client form modal -->
-    <q-dialog v-model="showClientsFormModal" @hide="closeClientsFormModal">
-      <ClientsForm
-        @close="closeClientsFormModal"
-        :op="clientOp"
-        :clientpk="deleteEditModalPk"
-        @edited="refreshEntireSite"
-      />
+    <!-- install agent modal -->
+    <q-dialog v-model="showInstallAgentModal" @hide="closeInstallAgent">
+      <InstallAgent @close="closeInstallAgent" :sitepk="parseInt(sitePk)" />
     </q-dialog>
-    <!-- edit site modal -->
-    <q-dialog v-model="showSitesFormModal" @hide="closeClientsFormModal">
-      <SitesForm
-        @close="closeClientsFormModal"
-        :op="clientOp"
-        :sitepk="deleteEditModalPk"
-        @edited="refreshEntireSite"
-      />
-    </q-dialog>
-    <!-- add policy modal -->
-    <q-dialog v-model="showPolicyAddModal">
-      <PolicyAdd @close="showPolicyAddModal = false" :type="policyAddType" :pk="parseInt(policyAddPk)" />
+    <!-- user preferences modal -->
+    <q-dialog v-model="showUserPreferencesModal">
+      <UserPreferences @close="showUserPreferencesModal = false" @edit="getDashInfo" />
     </q-dialog>
   </q-layout>
 </template>
 
 <script>
-import axios from "axios";
-import { notifySuccessConfig, notifyErrorConfig } from "@/mixins/mixins";
+import mixins from "@/mixins/mixins";
 import { mapState, mapGetters } from "vuex";
+import { getBaseUrl } from "@/boot/axios";
 import FileBar from "@/components/FileBar";
 import AgentTable from "@/components/AgentTable";
 import SubTableTabs from "@/components/SubTableTabs";
@@ -342,35 +380,34 @@ import AlertsIcon from "@/components/AlertsIcon";
 import PolicyAdd from "@/components/automation/modals/PolicyAdd";
 import ClientsForm from "@/components/modals/clients/ClientsForm";
 import SitesForm from "@/components/modals/clients/SitesForm";
+import DeleteClient from "@/components/modals/clients/DeleteClient";
+import InstallAgent from "@/components/modals/agents/InstallAgent";
+import UserPreferences from "@/components/modals/coresettings/UserPreferences";
+import AlertTemplateAdd from "@/components/modals/alerts/AlertTemplateAdd";
 
 export default {
+  name: "Dashboard",
+  emits: [],
   components: {
     FileBar,
     AgentTable,
     SubTableTabs,
     AlertsIcon,
-    PolicyAdd,
-    ClientsForm,
-    SitesForm,
+    InstallAgent,
+    UserPreferences,
   },
+  mixins: [mixins],
   data() {
     return {
-      darkMode: true,
-      showClientsFormModal: false,
-      showSitesFormModal: false,
-      showPolicyAddModal: false,
-      deleteEditModalPk: null,
-      clientOp: null,
-      policyAddType: null,
-      policyAddPk: null,
+      ws: null,
+      showInstallAgentModal: false,
+      sitePk: null,
       serverCount: 0,
       serverOfflineCount: 0,
       workstationCount: 0,
       workstationOfflineCount: 0,
-      outsideModel: 11,
       selectedTree: "",
       innerModel: 50,
-      tab: "server",
       clientActive: "",
       siteActive: "",
       frame: [],
@@ -379,9 +416,13 @@ export default {
       filterTextLength: 0,
       filterAvailability: "all",
       filterPatchesPending: false,
+      filterActionsPending: false,
       filterChecksFailing: false,
       filterRebootNeeded: false,
       currentTRMMVersion: null,
+      latestTRMMVersion: "error",
+      showUserPreferencesModal: false,
+      clear_search_when_switching: true,
       columns: [
         {
           name: "smsalert",
@@ -392,11 +433,18 @@ export default {
           align: "left",
         },
         {
+          name: "dashboardalert",
+          align: "left",
+        },
+        {
           name: "checks-status",
           align: "left",
           field: "checks",
           sortable: true,
-          sort: (a, b, rowA, rowB) => parseInt(b.failing) - a.failing,
+          sort: (a, b, rowA, rowB) =>
+            parseInt(b.failing) - parseInt(a.failing) ||
+            parseInt(b.warning) - parseInt(a.warning) ||
+            parseInt(b.info) - parseInt(a.info),
         },
         {
           name: "client_name",
@@ -429,20 +477,29 @@ export default {
         {
           name: "user",
           label: "User",
-          field: "logged_in_username",
+          field: "logged_username",
           sortable: true,
           align: "left",
         },
         {
-          name: "lastuser",
-          label: "Last User",
-          field: "last_logged_in_user",
-          sortable: true,
-          align: "left",
+          name: "italic",
+          field: "italic",
         },
         {
           name: "patchespending",
-          field: "patches_pending",
+          field: "has_patches_pending",
+          align: "left",
+          sortable: true,
+        },
+        {
+          name: "pendingactions",
+          field: "pending_actions_count",
+          align: "left",
+          sortable: true,
+        },
+        {
+          name: "needs_reboot",
+          field: "needs_reboot",
           align: "left",
           sortable: true,
         },
@@ -453,20 +510,15 @@ export default {
           sortable: true,
         },
         {
-          name: "needsreboot",
-          field: "needs_reboot",
-          align: "left",
-          sortable: true,
-        },
-        {
-          name: "lastseen",
+          name: "last_seen",
           label: "Last Response",
           field: "last_seen",
           sortable: true,
           align: "left",
+          sort: (a, b) => this.dateStringToUnix(a) - this.dateStringToUnix(b),
         },
         {
-          name: "boottime",
+          name: "boot_time",
           label: "Boot Time",
           field: "boot_time",
           sortable: true,
@@ -476,6 +528,7 @@ export default {
       visibleColumns: [
         "smsalert",
         "emailalert",
+        "dashboardalert",
         "checks-status",
         "client_name",
         "site_name",
@@ -483,10 +536,11 @@ export default {
         "description",
         "user",
         "patchespending",
+        "pendingactions",
         "agentstatus",
-        "needsreboot",
-        "lastseen",
-        "boottime",
+        "needs_reboot",
+        "last_seen",
+        "boot_time",
       ],
     };
   },
@@ -497,14 +551,36 @@ export default {
     },
   },
   methods: {
-    toggleDark(val) {
-      this.$q.dark.set(val);
-      this.$axios.patch("/accounts/users/ui/", { dark_mode: val });
+    setupWS() {
+      console.log("Starting websocket");
+      const proto = process.env.NODE_ENV === "production" || process.env.DOCKER_BUILD ? "wss" : "ws";
+      this.ws = new WebSocket(`${proto}://${this.wsUrl}/ws/dashinfo/?access_token=${this.token}`);
+      this.ws.onopen = e => {
+        console.log("Connected to ws");
+      };
+      this.ws.onmessage = e => {
+        const data = JSON.parse(e.data);
+        this.serverCount = data.total_server_count;
+        this.serverOfflineCount = data.total_server_offline_count;
+        this.workstationCount = data.total_workstation_count;
+        this.workstationOfflineCount = data.total_workstation_offline_count;
+      };
+      this.ws.onclose = e => {
+        console.log(`Closed code: ${e.code}`);
+        if (e.code !== 1000) {
+          setTimeout(() => {
+            this.setupWS();
+          }, 2 * 1000);
+        }
+      };
+      this.ws.onerror = err => {
+        console.log(`ERROR! Code: ${err.code}`);
+        this.ws.close();
+      };
     },
     refreshEntireSite() {
       this.$store.dispatch("loadTree");
-      this.getDashInfo();
-      this.getAgentCounts();
+      this.getDashInfo(false);
 
       if (this.allClientsActive) {
         this.loadAllClients();
@@ -523,25 +599,34 @@ export default {
       }
     },
     loadFrame(activenode, destroySub = true) {
+      if (this.clear_search_when_switching) this.clearFilter();
       if (destroySub) this.$store.commit("destroySubTable");
 
-      let url, urlType, id;
+      let execute = false;
+      let urlType, id;
+      let data = {};
+
       if (typeof activenode === "string") {
         urlType = activenode.split("|")[0];
         id = activenode.split("|")[1];
 
         if (urlType === "Client") {
-          url = `/agents/byclient/${id}/`;
+          data.clientPK = id;
+          execute = true;
         } else if (urlType === "Site") {
-          url = `/agents/bysite/${id}/`;
+          data.sitePK = id;
+          execute = true;
         }
 
-        if (url) {
+        if (execute) {
           this.$store.commit("AGENT_TABLE_LOADING", true);
-          axios.get(url).then(r => {
-            this.frame = r.data;
-            this.$store.commit("AGENT_TABLE_LOADING", false);
-          });
+          this.$axios
+            .patch("/agents/listagents/", data)
+            .then(r => {
+              this.frame = r.data;
+              this.$store.commit("AGENT_TABLE_LOADING", false);
+            })
+            .catch(e => {});
         }
       }
     },
@@ -550,6 +635,7 @@ export default {
       this.$store.dispatch("loadTree");
     },
     clearTreeSelected() {
+      if (this.clear_search_when_switching) this.clearFilter();
       this.selectedTree = "";
       this.getTree();
     },
@@ -559,47 +645,79 @@ export default {
     },
     loadAllClients() {
       this.$store.commit("AGENT_TABLE_LOADING", true);
-      axios.get("/agents/listagents/").then(r => {
-        this.frame = r.data;
-        //this.siteActive = "";
-        //this.$store.commit("destroySubTable");
-        this.$store.commit("AGENT_TABLE_LOADING", false);
-      });
+      this.$axios
+        .patch("/agents/listagents/")
+        .then(r => {
+          this.frame = r.data;
+          this.$store.commit("AGENT_TABLE_LOADING", false);
+        })
+        .catch(e => {});
     },
     showPolicyAdd(node) {
-      if (node.children) {
-        this.policyAddType = "client";
-        this.policyAddPk = node.id;
-        this.showPolicyAddModal = true;
-      } else {
-        this.policyAddType = "site";
-        this.policyAddPk = node.id;
-        this.showPolicyAddModal = true;
-      }
+      this.$q
+        .dialog({
+          component: PolicyAdd,
+          componentProps: {
+            type: node.children ? "client" : "site",
+            object: node,
+          },
+        })
+        .onOk(() => {
+          this.clearTreeSelected();
+        });
     },
-    showEditModal(node, op) {
-      this.deleteEditModalPk = node.id;
-      this.clientOp = op;
-      if (node.children) {
-        this.showClientsFormModal = true;
-      } else {
-        this.showSitesFormModal = true;
-      }
+    showAddSiteModal(node) {
+      this.$q.dialog({
+        component: SitesForm,
+        componentProps: {
+          client: node.id,
+        },
+      });
     },
-    showDeleteModal(node, op) {
-      this.deleteEditModalPk = node.id;
-      this.clientOp = op;
+    showEditModal(node) {
+      let props = {};
       if (node.children) {
-        this.showClientsFormModal = true;
+        props.client = { id: node.id, name: node.label };
       } else {
-        this.showSitesFormModal = true;
+        props.site = { id: node.id, name: node.label, client: node.client };
       }
+
+      this.$q.dialog({
+        component: node.children ? ClientsForm : SitesForm,
+        componentProps: {
+          ...props,
+        },
+      });
     },
-    closeClientsFormModal() {
-      this.showClientsFormModal = false;
-      this.showSitesFormModal = false;
-      this.deleteEditModalPk = null;
-      this.clientOp = null;
+    showDeleteModal(node) {
+      this.$q.dialog({
+        component: DeleteClient,
+        componentProps: {
+          object: { id: node.id, name: node.label },
+          type: node.children ? "client" : "site",
+        },
+      });
+    },
+    showInstallAgent(node) {
+      this.sitePk = node.id;
+      this.showInstallAgentModal = true;
+    },
+    closeInstallAgent() {
+      this.showInstallAgentModal = false;
+      this.sitePk = null;
+    },
+    showAlertTemplateAdd(node) {
+      this.$q
+        .dialog({
+          component: AlertTemplateAdd,
+          componentProps: {
+            type: node.children ? "client" : "site",
+            object: node,
+          },
+        })
+        .onOk(() => {
+          this.clearTreeSelected();
+        });
     },
     reload() {
       this.$store.dispatch("reload");
@@ -607,54 +725,52 @@ export default {
     livePoll() {
       this.poll = setInterval(() => {
         this.$store.dispatch("checkVer");
-        this.getAgentCounts();
-        this.getDashInfo();
+        this.getDashInfo(false);
       }, 60 * 5 * 1000);
     },
     setSplitter(val) {
       this.$store.commit("SET_SPLITTER", val);
     },
-    getAgentCounts(selected) {
-      this.$store.dispatch("getAgentCounts").then(r => {
-        this.serverCount = r.data.total_server_count;
-        this.serverOfflineCount = r.data.total_server_offline_count;
-        this.workstationCount = r.data.total_workstation_count;
-        this.workstationOfflineCount = r.data.total_workstation_offline_count;
-      });
-    },
-    getDashInfo() {
+    getDashInfo(edited = true) {
       this.$store.dispatch("getDashInfo").then(r => {
-        this.darkMode = r.data.dark_mode;
-        this.$q.dark.set(this.darkMode);
+        if (edited) {
+          this.$q.loadingBar.setDefaults({ color: r.data.loading_bar_color });
+          this.clear_search_when_switching = r.data.clear_search_when_switching;
+          this.$store.commit("SET_DEFAULT_AGENT_TBL_TAB", r.data.default_agent_tbl_tab);
+          this.$store.commit("SET_CLIENT_TREE_SORT", r.data.client_tree_sort);
+          this.$store.commit("SET_CLIENT_SPLITTER", r.data.client_tree_splitter);
+        }
+        this.$q.dark.set(r.data.dark_mode);
         this.currentTRMMVersion = r.data.trmm_version;
+        this.latestTRMMVersion = r.data.latest_trmm_ver;
+        this.$store.commit("SET_AGENT_DBLCLICK_ACTION", r.data.dbl_click_action);
+        this.$store.commit("SET_URL_ACTION", r.data.url_action);
+        this.$store.commit("setShowCommunityScripts", r.data.show_community_scripts);
+        this.$store.commit("SET_HOSTED", r.data.hosted);
       });
     },
     showToggleMaintenance(node) {
       let data = {
         id: node.id,
         type: node.raw.split("|")[0],
-        action: node.color === "warning" ? false : true,
+        action: node.color === "green" ? false : true,
       };
 
-      const text = node.color === "warning" ? "Maintenance mode was disabled" : "Maintenance mode was enabled";
-      this.$store
-        .dispatch("toggleMaintenanceMode", data)
-        .then(response => {
-          this.$q.notify(notifySuccessConfig(text));
-          this.getTree();
-        })
-        .catch(error => {
-          this.$q.notify(notifyErrorConfig("An Error occured. Please try again"));
-        });
+      const text = node.color === "green" ? "Maintenance mode was disabled" : "Maintenance mode was enabled";
+      this.$store.dispatch("toggleMaintenanceMode", data).then(response => {
+        this.notifySuccess(text);
+        this.getTree();
+      });
     },
     menuMaintenanceText(node) {
-      return node.color === "warning" ? "Disable Maintenance Mode" : "Enable Maintenance Mode";
+      return node.color === "green" ? "Disable Maintenance Mode" : "Enable Maintenance Mode";
     },
     clearFilter() {
       this.filterTextLength = 0;
       this.filterPatchesPending = false;
       this.filterRebootNeeded = false;
       this.filterChecksFailing = false;
+      this.filterActionsPending = false;
       this.filterAvailability = "all";
       this.search = "";
     },
@@ -673,6 +789,10 @@ export default {
 
       if (this.filterPatchesPending) {
         filterText += "is:patchespending ";
+      }
+
+      if (this.filterActionsPending) {
+        filterText += "is:actionspending ";
       }
 
       if (this.filterChecksFailing) {
@@ -705,14 +825,39 @@ export default {
       clients: state => state.clients,
     }),
     ...mapGetters(["selectedAgentPk", "needRefresh"]),
+    latestReleaseURL() {
+      return this.latestTRMMVersion !== "error"
+        ? `https://github.com/wh1te909/tacticalrmm/releases/tag/v${this.latestTRMMVersion}`
+        : "";
+    },
+    wsUrl() {
+      return getBaseUrl().split("://")[1];
+    },
+    token() {
+      return this.$store.state.token;
+    },
+    clientTreeSplitter: {
+      get() {
+        return this.$store.state.clientTreeSplitter;
+      },
+      set(newVal) {
+        this.$store.commit("SET_CLIENT_SPLITTER", newVal);
+      },
+    },
+    tab: {
+      get() {
+        return this.$store.state.defaultAgentTblTab;
+      },
+      set(newVal) {
+        this.$store.commit("SET_DEFAULT_AGENT_TBL_TAB", newVal);
+      },
+    },
     allClientsActive() {
-      return this.selectedTree === "" ? true : false;
+      return this.selectedTree === "";
     },
     filteredAgents() {
-      if (this.tab === "mixed") {
-        return Object.freeze(this.frame);
-      }
-      return Object.freeze(this.frame.filter(k => k.monitoring_type === this.tab));
+      if (this.tab === "mixed") return this.frame;
+      else return this.frame.filter(k => k.monitoring_type === this.tab);
     },
     activeNode() {
       return {
@@ -723,6 +868,7 @@ export default {
     isFilteringTable() {
       return (
         this.filterPatchesPending ||
+        this.filterActionsPending ||
         this.filterChecksFailing ||
         this.filterRebootNeeded ||
         this.filterAvailability !== "all"
@@ -734,19 +880,27 @@ export default {
     totalOfflineAgents() {
       return this.serverOfflineCount + this.workstationOfflineCount;
     },
-  },
-  created() {
-    this.getDashInfo();
-    this.getTree();
-    this.$store.dispatch("getUpdatedSites");
-    this.$store.dispatch("checkVer");
-    this.getAgentCounts();
+    darkMode: {
+      get() {
+        return this.$q.dark.isActive;
+      },
+      set(value) {
+        this.$axios.patch("/accounts/users/ui/", { dark_mode: value }).catch(e => {});
+        this.$q.dark.set(value);
+      },
+    },
   },
   mounted() {
-    this.loadFrame(this.activeNode);
+    this.setupWS();
+    this.getDashInfo();
+    this.$store.dispatch("getUpdatedSites");
+    this.$store.dispatch("checkVer");
+    this.getTree();
+
     this.livePoll();
   },
-  beforeDestroy() {
+  beforeUnmount() {
+    this.ws.close();
     clearInterval(this.poll);
   },
 };

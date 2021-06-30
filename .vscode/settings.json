@@ -2,8 +2,15 @@
     "python.pythonPath": "api/tacticalrmm/env/bin/python",
     "python.languageServer": "Pylance",
     "python.analysis.extraPaths": [
-        "api/tacticalrmm"
+        "api/tacticalrmm",
+        "api/env",
     ],
+    "python.analysis.diagnosticSeverityOverrides": {
+        "reportUnusedImport": "error",
+        "reportDuplicateImport": "error",
+    },
+    "python.analysis.memory.keepLibraryAst": true,
+    "python.linting.mypyEnabled": true,
     "python.analysis.typeCheckingMode": "basic",
     "python.formatting.provider": "black",
     "editor.formatOnSave": true,
@@ -41,4 +48,23 @@
             "**/*.zip": true
         },
     },
+    "go.useLanguageServer": true,
+    "[go]": {
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+            "source.organizeImports": false,
+        },
+        "editor.snippetSuggestions": "none",
+    },
+    "[go.mod]": {
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+            "source.organizeImports": true,
+        },
+    },
+    "gopls": {
+        "usePlaceholders": true,
+        "completeUnimported": true,
+        "staticcheck": true,
+    }
 }

@@ -1,42 +1,41 @@
-import Vue from "vue";
-import Vuex from "vuex";
+import { createStore } from 'vuex'
 import axios from "axios";
-import { Notify } from "quasar";
-import alertsModule from "./alerts";
-import automationModule from "./automation";
-import adminModule from "./admin.js"
-
-Vue.use(Vuex);
 
 export default function () {
-  const Store = new Vuex.Store({
-    modules: {
-      automation: automationModule,
-      alerts: alertsModule,
-      admin: adminModule
-    },
-    state: {
-      username: localStorage.getItem("user_name") || null,
-      token: localStorage.getItem("access_token") || null,
-      clients: {},
-      tree: [],
-      treeReady: false,
-      selectedRow: null,
-      agentSummary: {},
-      winUpdates: {},
-      agentChecks: null,
-      automatedTasks: {},
-      agentTableLoading: false,
-      treeLoading: false,
-      installedSoftware: [],
-      scripts: [],
-      notes: [],
-      toggleScriptManager: false,
-      needrefresh: false,
-      tableHeight: "35vh",
-      tabHeight: "35vh",
+  const Store = new createStore({
+    state() {
+      return {
+        username: localStorage.getItem("user_name") || null,
+        token: localStorage.getItem("access_token") || null,
+        clients: {},
+        tree: [],
+        treeReady: false,
+        selectedRow: null,
+        agentSummary: {},
+        winUpdates: {},
+        agentChecks: null,
+        automatedTasks: {},
+        agentTableLoading: false,
+        treeLoading: false,
+        installedSoftware: [],
+        notes: [],
+        needrefresh: false,
+        tableHeight: "35vh",
+        tabHeight: "35vh",
+        showCommunityScripts: false,
+        agentDblClickAction: "",
+        agentUrlAction: null,
+        defaultAgentTblTab: "server",
+        clientTreeSort: "alphafail",
+        clientTreeSplitter: 11,
+        noCodeSign: false,
+        hosted: false
+      }
     },
     getters: {
+      clientTreeSplitterModel(state) {
+        return state.clientTreeSplitter;
+      },
       loggedIn(state) {
         return state.token !== null;
       },
@@ -51,6 +50,9 @@ export default function () {
       },
       checks(state) {
         return state.agentChecks;
+      },
+      showCommunityScripts(state) {
+        return state.showCommunityScripts;
       },
       sortedUpdates(state) {
         // sort patches by latest then not installed
@@ -68,9 +70,6 @@ export default function () {
       agentHostname(state) {
         return state.agentSummary.hostname;
       },
-      scripts(state) {
-        return state.scripts;
-      },
       needRefresh(state) {
         return state.needrefresh;
       },
@@ -82,9 +81,6 @@ export default function () {
       },
     },
     mutations: {
-      TOGGLE_SCRIPT_MANAGER(state, action) {
-        state.toggleScriptManager = action;
-      },
       AGENT_TABLE_LOADING(state, visible) {
         state.agentTableLoading = visible;
       },
@@ -128,9 +124,6 @@ export default function () {
         (state.installedSoftware = []);
         state.selectedRow = "";
       },
-      SET_SCRIPTS(state, scripts) {
-        state.scripts = scripts;
-      },
       SET_REFRESH_NEEDED(state, action) {
         state.needrefresh = action;
       },
@@ -140,16 +133,46 @@ export default function () {
         agentHeight <= 15.0 ? state.tableHeight = "15vh" : state.tableHeight = `${agentHeight}vh`;
         tabsHeight <= 15.0 ? state.tabHeight = "15vh" : state.tabHeight = `${tabsHeight}vh`;
       },
+      SET_CLIENT_SPLITTER(state, val) {
+        state.clientTreeSplitter = val;
+      },
       SET_NOTES(state, notes) {
         state.notes = notes;
+      },
+      setShowCommunityScripts(state, show) {
+        state.showCommunityScripts = show
+      },
+      SET_AGENT_DBLCLICK_ACTION(state, action) {
+        state.agentDblClickAction = action
+      },
+      SET_URL_ACTION(state, action) {
+        state.agentUrlAction = action
+      },
+      SET_DEFAULT_AGENT_TBL_TAB(state, tab) {
+        state.defaultAgentTblTab = tab
+      },
+      SET_CLIENT_TREE_SORT(state, val) {
+        state.clientTreeSort = val
+      },
+      SET_HOSTED(state, val) {
+        state.hosted = val
       }
     },
     actions: {
+      setClientTreeSplitter(context, val) {
+        axios.patch("/accounts/users/ui/", { client_tree_splitter: Math.trunc(val) }).then(r => {
+          context.commit("SET_CLIENT_SPLITTER", val)
+        })
+          .catch(e => { })
+      },
+      setShowCommunityScripts(context, data) {
+        axios.patch("/accounts/users/ui/", { show_community_scripts: data }).then(r => {
+          context.commit("setShowCommunityScripts", data)
+        })
+          .catch(e => { })
+      },
       toggleMaintenanceMode(context, data) {
         return axios.post("/agents/maintenance/", data)
-      },
-      getAgentCounts(context, data = {}) {
-        return axios.post("/agents/agent_counts/", data)
       },
       getDashInfo(context) {
         return axios.get("/core/dashinfo/");
@@ -158,36 +181,37 @@ export default function () {
         axios.get(`/tasks/${pk}/automatedtasks/`).then(r => {
           context.commit("SET_AUTOMATED_TASKS", r.data);
         })
-      },
-      getScripts(context) {
-        axios.get("/scripts/scripts/").then(r => {
-          context.commit("SET_SCRIPTS", r.data);
-        });
+          .catch(e => { })
       },
       loadInstalledSoftware(context, pk) {
         axios.get(`/software/installed/${pk}`).then(r => {
           context.commit("SET_INSTALLED_SOFTWARE", r.data.software);
-        });
+        })
+          .catch(e => { });
       },
       loadWinUpdates(context, pk) {
         axios.get(`/winupdate/${pk}/getwinupdates/`).then(r => {
           context.commit("SET_WIN_UPDATE", r.data);
-        });
+        })
+          .catch(e => { });
       },
       loadSummary(context, pk) {
         axios.get(`/agents/${pk}/agentdetail/`).then(r => {
           context.commit("setSummary", r.data);
-        });
+        })
+          .catch(e => { });
       },
       loadChecks(context, pk) {
         axios.get(`/checks/${pk}/loadchecks/`).then(r => {
           context.commit("setChecks", r.data);
-        });
+        })
+          .catch(e => { });
       },
       loadNotes(context, pk) {
         axios.get(`/agents/${pk}/notes/`).then(r => {
           context.commit("SET_NOTES", r.data.notes);
-        });
+        })
+          .catch(e => { });
       },
       loadDefaultServices(context) {
         return axios.get("/services/getdefaultservices/");
@@ -210,7 +234,8 @@ export default function () {
       getUpdatedSites(context) {
         axios.get("/clients/clients/").then(r => {
           context.commit("getUpdatedSites", r.data);
-        });
+        })
+          .catch(e => { });
       },
       loadClients(context) {
         return axios.get("/clients/clients/");
@@ -218,10 +243,7 @@ export default function () {
       loadSites(context) {
         return axios.get("/clients/sites/");
       },
-      loadAgents(context) {
-        return axios.get("/agents/listagents/");
-      },
-      loadTree({ commit }) {
+      loadTree({ commit, state }) {
         axios.get("/clients/tree/").then(r => {
 
           if (r.data.length === 0) {
@@ -240,10 +262,17 @@ export default function () {
                 raw: `Site|${site.id}`,
                 header: "generic",
                 icon: "apartment",
+                client: client.id,
+                selectable: true,
+                server_policy: site.server_policy,
+                workstation_policy: site.workstation_policy,
+                alert_template: site.alert_template,
+                blockInheritance: site.block_policy_inheritance
               }
 
-              if (site.maintenance_mode) { siteNode["color"] = "warning" }
-              else if (site.failing_checks) { siteNode["color"] = "negative" }
+              if (site.maintenance_mode) { siteNode["color"] = "green" }
+              else if (site.failing_checks.error) { siteNode["color"] = "negative" }
+              else if (site.failing_checks.warning) { siteNode["color"] = "warning" }
 
               childSites.push(siteNode);
             }
@@ -254,19 +283,33 @@ export default function () {
               raw: `Client|${client.id}`,
               header: "root",
               icon: "business",
+              server_policy: client.server_policy,
+              workstation_policy: client.workstation_policy,
+              alert_template: client.alert_template,
+              blockInheritance: client.block_policy_inheritance,
               children: childSites
             }
 
-            if (client.maintenance_mode) clientNode["color"] = "warning"
-            else if (client.failing_checks) clientNode["color"] = "negative"
+            if (client.maintenance_mode) clientNode["color"] = "green"
+            else if (client.failing_checks.error) { clientNode["color"] = "negative" }
+            else if (client.failing_checks.warning) { clientNode["color"] = "warning" }
 
             output.push(clientNode);
           }
 
-          // move failing clients to the top
-          const sortedByFailing = output.sort(a => a.color === "negative" ? -1 : 1)
-          commit("loadTree", sortedByFailing);
-        });
+
+          if (state.clientTreeSort === "alphafail") {
+            // move failing clients to the top
+            const failing = output.filter(i => i.color === "negative" || i.color === "warning");
+            const ok = output.filter(i => i.color !== "negative" && i.color !== "warning");
+            const sortedByFailing = [...failing, ...ok];
+            commit("loadTree", sortedByFailing);
+          } else {
+            commit("loadTree", output);
+          }
+
+        })
+          .catch(e => { });
       },
       checkVer(context) {
         axios.get("/core/version/").then(r => {
@@ -284,6 +327,7 @@ export default function () {
             return;
           }
         })
+          .catch(e => { })
       },
       reload() {
         localStorage.removeItem("rmmver");
@@ -301,14 +345,7 @@ export default function () {
               context.commit("retrieveToken", { token, username });
               resolve(response);
             })
-            .catch(error => {
-              Notify.create({
-                type: "negative",
-                timeout: 1000,
-                message: "Bad token"
-              });
-              reject(error);
-            });
+            .catch(e => { })
         });
       },
       destroyToken(context) {
